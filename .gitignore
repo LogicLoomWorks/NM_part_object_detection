@@ -3,9 +3,11 @@
 
 .venv/
 data/
+models/
+
 
 requirements.txt
-
+notes.txt
 
 
 
