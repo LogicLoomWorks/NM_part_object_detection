@@ -3,7 +3,9 @@
 
 .venv/
 data/
-models/
+models/checkpoints/
+models/final/
+models/pretrained/
 
 
 requirements.txt

@@ -1,0 +1,659 @@
+
+
+
+STAGE 1 — DATA UNDERSTANDING (EDA) FOR OBJECT DETECTION DATASET
+
+Goal:
+Understand dataset size, distribution, annotation quality, and difficulty before choosing model.
+
+
+1. BASIC DATASET STATISTICS
+
+Compute:
+- number of images
+- number of annotations
+- number of categories
+- annotations per image
+- categories per image
+
+Plots:
+- histogram: annotations per image
+- histogram: categories per image
+
+
+2. CLASS DISTRIBUTION
+
+Compute:
+- count per category
+- mean annotations per class
+- min / max annotations per class
+- long-tail ratio
+
+Plots:
+- bar plot of class counts (sorted)
+- top 20 classes
+- bottom 20 classes
+- log-scale class distribution
+
+
+3. BOUNDING BOX STATISTICS
+
+Compute from bbox:
+- width
+- height
+- area
+- aspect ratio
+
+Plots:
+- histogram of bbox width
+- histogram of bbox height
+- histogram of bbox area
+- histogram of aspect ratio
+- scatter plot width vs height
+
+
+4. IMAGE SIZE STATISTICS
+
+Compute:
+- image width
+- image height
+- image aspect ratio
+
+Plots:
+- histogram of image width
+- histogram of image height
+- histogram of image aspect ratio
+
+
+5. OBJECTS PER IMAGE
+
+Compute:
+- number of boxes per image
+
+Plots:
+- histogram of boxes per image
+
+
+6. VISUALIZATION OF ANNOTATIONS
+
+Show random samples:
+- image with bounding boxes
+- image with labels
+
+Also show:
+- image with many objects
+- image with few objects
+- image with small objects
+- image with large objects
+
+
+7. ANNOTATION QUALITY CHECK
+
+Check:
+- bbox outside image
+- negative bbox values
+- zero area bbox
+- missing category_id
+- missing product_code
+- duplicate annotations
+
+Print counts of errors.
+
+
+8. CATEGORY / PRODUCT CONSISTENCY
+
+Check:
+- same product_code → same category_id
+- same category_id → multiple product_code
+- missing product_code
+- missing product_name
+
+
+9. DATASET DOMAIN / SECTION DISTRIBUTION
+
+Check:
+- images per section
+- annotations per section
+- categories per section
+
+Plot:
+- bar plot per section
+
+
+10. PRODUCT REFERENCE IMAGE DATASET
+
+Check:
+- number of products
+- views per product
+- missing views
+- resolution per image
+
+Plot:
+- histogram of views per product
+
+
+11. DIFFICULTY METRICS
+
+Compute:
+- % small boxes
+- % large boxes
+- % crowded images (>20 objects)
+- % rare classes (<10 samples)
+- class imbalance ratio
+
+Print summary.
+
+
+12. REQUIRED OUTPUT FIGURES
+
+Must generate:
+- class distribution plot
+- bbox area histogram
+- objects per image histogram
+- image size histogram
+- aspect ratio histogram
+- width vs height scatter
+- random annotated images
+- top / bottom classes plot
+
+
+13. CLASS CO-OCCURRENCE ANALYSIS
+
+Compute:
+- class co-occurrence matrix
+- unique classes per image
+- most frequent class pairs
+
+Plots:
+- heatmap of class co-occurrence
+- histogram of unique classes per image
+
+
+14. CLASS SIZE DISTRIBUTION PER CLASS
+
+Compute per class:
+- mean bbox area per class
+- median bbox area per class
+- min bbox area per class
+- max bbox area per class
+- % small boxes per class
+
+Plots:
+- boxplot of bbox area per class (top classes only)
+
+
+15. IMAGE CROWDING / DENSITY ANALYSIS
+
+Compute:
+- objects per image
+- total bbox area / image area
+- overlap ratio per image
+
+Plots:
+- histogram of object density
+- histogram of overlap ratio
+
+
+16. OVERLAPPING BOX ANALYSIS
+
+Compute:
+- IoU between boxes in same image
+- number of overlapping boxes per image
+
+Plots:
+- histogram of IoU
+- histogram of overlaps per image
+
+
+17. SECTION / DOMAIN SHIFT ANALYSIS
+
+Compute:
+- images per section
+- annotations per section
+- categories per section
+- bbox size per section
+- objects per image per section
+
+Plots:
+- class distribution per section
+- bbox size per section
+- objects per image per section
+
+
+18. PRODUCT_CODE ↔ CATEGORY_ID CONSISTENCY (STRICT CHECK)
+
+Check:
+- product_code → multiple category_id
+- category_id → multiple product_code
+- missing product_code
+- missing product_name
+- mismatched category_id vs product_name
+
+Print counts of errors.
+
+
+19. REFERENCE IMAGE DATASET CONSISTENCY
+
+Check:
+- reference folder per product_code
+- missing reference folder
+- missing views (main/front/back/left/right/top/bottom)
+- unused reference products
+- annotations without reference images
+
+Compute:
+- views per product
+
+Plot:
+- histogram of views per product
+
+
+20. BBOX POSITION DISTRIBUTION
+
+Compute:
+- bbox center x
+- bbox center y
+
+Plots:
+- heatmap of bbox centers
+- scatter plot of bbox centers
+
+
+21. EXTREME OUTLIERS
+
+Find:
+- image with most objects
+- image with least objects
+- largest bbox
+- smallest bbox
+- rarest class
+- most frequent class
+
+Print file names.
+
+
+22. TRAINING DIFFICULTY SUMMARY
+
+Compute:
+- average objects per image
+- average annotations per class
+- min annotations per class
+- % classes with < 5 samples
+- % classes with < 10 samples
+- % classes with < 20 samples
+- % small boxes
+- % large boxes
+- % crowded images (>20 objects)
+- class imbalance ratio (max / min)
+
+Print summary.
+
+
+23. AUGMENTATION DESIGN STATS
+
+Compute:
+- min image width
+- max image width
+- min image height
+- max image height
+- min bbox size
+- max bbox size
+- image aspect ratio range
+- bbox aspect ratio range
+
+Print summary.
+
+
+24. FINAL REQUIRED OUTPUT FIGURES (EXTRA)
+
+Must also generate:
+- co-occurrence heatmap
+- bbox center heatmap
+- overlap histogram
+- per-section distribution plot
+- density histogram
+- reference image statistics plot
+- difficulty summary report
+
+25. COCO FORMAT VALIDATION
+
+Check:
+- all image_id exist in images
+- all category_id exist in categories
+- all annotation image_id valid
+- all annotation category_id valid
+- unique annotation ids
+- unique image ids
+- unique category ids
+
+Print counts of errors.
+
+
+26. CATEGORY NAME CONSISTENCY
+
+Check:
+- category_id → unique category name
+- duplicate category names
+- empty category names
+- unknown_product count
+
+Plot:
+- histogram of name length
+- count of unknown_product
+
+
+27. CORRECTED FLAG ANALYSIS
+
+Check:
+- number of corrected annotations
+- % corrected annotations
+- corrected per class
+- corrected per section
+
+Plots:
+- bar plot corrected vs not corrected
+- corrected per class (top classes)
+
+
+28. SECTION CLASS IMBALANCE
+
+Compute per section:
+- class counts
+- rare classes per section
+- missing classes per section
+
+Plots:
+- class distribution per section (log scale)
+- rare classes per section
+
+
+29. TRAIN / VAL SPLIT SIMULATION
+
+Simulate split:
+- 80 / 20 split
+- stratified by category
+
+Check:
+- class distribution train vs val
+- rare classes lost in val
+- rare classes lost in train
+
+Print warnings.
+
+
+30. SMALL OBJECT ANALYSIS (CRITICAL FOR DETR / DINO)
+
+Compute:
+- bbox area / image area
+
+Count:
+- < 1%
+- < 0.5%
+- < 0.1%
+
+Plot:
+- histogram of relative bbox size
+
+
+31. LARGE OBJECT ANALYSIS
+
+Compute:
+- bbox area / image area > 30%
+- bbox area / image area > 50%
+
+Print counts.
+
+
+32. MULTI-LABEL IMAGE ANALYSIS
+
+Compute:
+- number of unique classes per image
+- images with >10 classes
+- images with >20 classes
+
+Plot:
+- histogram unique classes per image
+
+
+33. HARD IMAGE DETECTION
+
+Find images with:
+- many objects
+- very small objects
+- high overlap
+- many classes
+- rare classes
+
+Save list of file names.
+
+
+34. IOU DISTRIBUTION VS CLASS
+
+Compute:
+- overlap per class
+- overlap per image
+
+Plot:
+- IoU per class
+- IoU per section
+
+
+35. CLASS SIMILARITY RISK
+
+Check:
+- classes with very similar names
+- same product different size
+- same brand different variant
+
+Print:
+- pairs of similar class names
+
+
+36. PRODUCT_CODE FREQUENCY
+
+Compute:
+- annotations per product_code
+- unique images per product_code
+
+Plot:
+- histogram per product_code
+
+
+37. REFERENCE ↔ COCO MATCH CHECK
+
+Check:
+- product_code in annotations but not in reference
+- reference product not used in annotations
+
+Print counts.
+
+
+38. REFERENCE IMAGE QUALITY
+
+Compute:
+- resolution per view
+- missing view types
+- corrupted images
+
+Plot:
+- histogram resolution
+
+
+39. ANNOTATION AREA VS CLASS
+
+Compute per class:
+- mean area
+- median area
+- std area
+
+Plot:
+- boxplot area per class (top 10)
+
+
+40. IMAGE BRIGHTNESS / CONTRAST CHECK
+
+Compute per image:
+- mean pixel value
+- std pixel value
+
+Plot:
+- histogram brightness
+- histogram contrast
+
+Reason:
+lighting variation affects detection
+
+
+41. COLOR DISTRIBUTION CHECK
+
+Compute:
+- mean RGB per image
+
+Plot:
+- RGB histograms
+
+Reason:
+domain shift between sections
+
+
+42. EXTREME CLASS IMBALANCE REPORT
+
+Compute:
+- max class count
+- min class count
+- median class count
+- imbalance ratio
+- gini coefficient (optional)
+
+Print summary.
+
+
+43. MODEL INPUT SIZE FEASIBILITY
+
+Check:
+- images larger than 1024
+- images smaller than 256
+- very wide images
+- very tall images
+
+Print recommendations for resize.
+
+
+44. DETECTION DIFFICULTY SCORE
+
+Define score using:
+- small boxes %
+- crowded images %
+- imbalance ratio
+- rare classes %
+- overlap %
+
+Print difficulty score.
+
+
+45. FINAL EDA REPORT
+
+Print:
+
+DATASET SIZE
+CLASS IMBALANCE
+SMALL OBJECT %
+CROWDED %
+RARE CLASS %
+SECTION SHIFT
+REFERENCE MATCH ERRORS
+ANNOTATION ERRORS
+DIFFICULTY SCORE
+
+Save report.txt
+
+
+46. SAVE ALL FIGURES
+
+Save to:
+
+eda/plots/
+eda/reports/
+eda/samples/
+
+Ensure reproducibility.
+
+
+47. SAVE CLEANED METADATA
+
+Save:
+
+images.csv
+annotations.csv
+categories.csv
+products.csv
+sections.csv
+
+For later training pipeline.
+
+---------------------------------------------------------------------
+
+48. PREPARE STATS FOR MODEL DESIGN
+
+Return:
+
+recommended_input_size
+recommended_batch_size
+small_object_ratio
+num_classes
+max_objects_per_image
+rare_class_count
+imbalance_ratio
+avg_objects_per_image
+
+Used in Stage 2.
+
+
+what more will i need? write what i lack so i can easily copy-paste it
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Create the project structure with models/groundingdino/, training/, inference/, and configs/, move existing code into the correct folders, keep run.py as the submission entrypoint, and update imports so the project runs without errors.
+Implement the GroundingDINO model inside models/groundingdino/model.py and allow the backbone to be selected via config.
+Add support for CNN backbones such as ResNet or ConvNeXt without changing the structure, ensuring training, inference, and checkpoints remain compatible.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

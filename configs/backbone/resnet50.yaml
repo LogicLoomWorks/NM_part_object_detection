@@ -1,0 +1,4 @@
+name: resnet50
+pretrained: true
+freeze_at: 1
+out_indices: [2, 3, 4]
