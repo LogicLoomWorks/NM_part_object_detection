@@ -87,21 +87,8 @@ class GroundingDINO(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        # FIX: initialise reference_points weights directly in (0, 1) so that
-        # .sigmoid() maps them to a well-spread set of anchor positions.
-        #
-        # The original code used the default nn.Embedding init (N(0,1)), which
-        # means .sigmoid() clusters around 0.5 with long tails approaching 0
-        # and 1.  Values very close to 0 or 1 cause inverse_sigmoid (logit) in
-        # the decoder's box refinement to produce ±inf, which then combines
-        # with a finite box_delta to give NaN (inf − inf) that propagates
-        # through every subsequent decoder layer.
-        #
-        # uniform_(0.05, 0.95) keeps all initial anchors in a safe interior
-        # region where inverse_sigmoid is finite and well-conditioned.
         nn.init.uniform_(self.reference_points.weight, 0.05, 0.95)
 
-        # Xavier-uniform for input projection conv weights (standard practice)
         for proj in self.input_proj:
             for m in proj.modules():
                 if isinstance(m, nn.Conv2d):
@@ -135,7 +122,6 @@ class GroundingDINO(nn.Module):
                     image_mask[:, None].float(), size=(H, W), mode="nearest"
                 ).squeeze(1).bool()
             else:
-                # No padding: every pixel is valid
                 m = torch.ones(B, H, W, dtype=torch.bool, device=feat.device)
             masks_list.append(m)
             pos_list.append(self.pos_embed(feat, m))   # (B, d_model, H, W)
@@ -165,10 +151,8 @@ class GroundingDINO(nn.Module):
         B = images.size(0)
 
         # ── 1. Backbone → Neck ─────────────────────────────────────────────
-        # backbone returns (feature_maps, padding_masks); we use our own masks
-        # derived from image_mask so the backbone's masks are discarded.
-        backbone_feats, _ = self.backbone(images)      # list [C3, C4, C5]
-        neck_feats        = self.neck(backbone_feats)  # list [P3, P4, P5, P6]
+        backbone_feats = self.backbone(images)         # list [C3, C4, C5]
+        neck_feats     = self.neck(backbone_feats)     # list [P3, P4, P5, P6]
 
         # ── 2. Input projection + positional embeddings ────────────────────
         proj_feats              = [proj(f) for proj, f in zip(self.input_proj, neck_feats)]
@@ -194,18 +178,9 @@ class GroundingDINO(nn.Module):
         memory = self.encoder(src, key_padding_mask, pos_enc)     # (B, total_HW, C)
 
         # ── 5. Decoder inputs ──────────────────────────────────────────────
-        # Expand embedding weights from (Q, C) to (B, Q, C)
         tgt       = self.tgt_embed.weight.unsqueeze(0).expand(B, -1, -1)
         query_pos = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
 
-        # FIX: clamp reference points to (0.05, 0.95) before passing to the
-        # decoder.  _init_weights already initialises the raw weights in this
-        # range, so this clamp is a no-op at the start of training.  However,
-        # during training the embedding weights are updated by gradient descent
-        # and can drift outside the safe region.  The clamp here ensures that
-        # inverse_sigmoid(ref) inside the decoder never returns ±inf regardless
-        # of how far the weights drift, providing ongoing protection beyond the
-        # first forward pass.
         ref_pts = self.reference_points.weight.sigmoid().clamp(1e-4, 1.0 - 1e-4)
         ref_pts = ref_pts.unsqueeze(0).expand(B, -1, -1)          # (B, Q, 4)
 
@@ -233,7 +208,7 @@ class GroundingDINO(nn.Module):
 
 def build_model(cfg: DictConfig) -> GroundingDINO:
     """Build a GroundingDINO model from an OmegaConf config."""
-    mc = cfg.model
+    mc = cfg
     tc = mc.transformer
 
     backbone = build_backbone(mc.backbone)
@@ -297,11 +272,7 @@ def load_checkpoint(
     path: str,
     cfg:  DictConfig,
 ) -> Tuple[GroundingDINO, dict]:
-    """Load weights from a checkpoint, verifying backbone/class compatibility.
-
-    Raises ValueError if the checkpoint was trained with a different backbone
-    or a different number of classes, preventing silent architecture mismatches.
-    """
+    """Load weights from a checkpoint, verifying backbone/class compatibility."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
 
     if ckpt["backbone_name"] != cfg.model.backbone.name:

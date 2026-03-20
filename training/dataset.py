@@ -25,7 +25,7 @@ import torch
 from pycocotools.coco import COCO
 from torch.utils.data import Dataset
 
-from training.transforms import build_train_transforms, build_val_transforms
+from training.transforms import get_train_transforms, get_val_transforms
 
 
 class COCODetectionDataset(Dataset):
@@ -218,7 +218,7 @@ def build_train_dataset(
     return COCODetectionDataset(
         ann_file=ann_file,
         img_dir=img_dir,
-        transforms=build_train_transforms(max_size=max_size),
+        transforms=get_train_transforms(max_size=max_size),
     )
 
 
@@ -231,5 +231,5 @@ def build_val_dataset(
     return COCODetectionDataset(
         ann_file=ann_file,
         img_dir=img_dir,
-        transforms=build_val_transforms(max_size=max_size),
+        transforms=get_val_transforms(max_size=max_size),
     )

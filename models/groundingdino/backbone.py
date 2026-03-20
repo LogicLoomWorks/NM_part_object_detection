@@ -89,44 +89,26 @@ class TimmBackbone(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        masks: List[torch.Tensor] | None = None,
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """Extract multi-scale feature maps and propagate padding masks.
+        mask: torch.Tensor | None = None,
+    ) -> List[torch.Tensor]:
+        """Extract multi-scale feature maps.
 
         Args:
-            x:     (B, 3, H, W) input image tensor, normalised to ImageNet stats.
-            masks: optional list of (B, H, W) bool tensors, one per scale,
-                   True = padded / invalid position.  When None, all-False masks
-                   are generated automatically at each scale.
+            x:    (B, 3, H, W) input image tensor, normalised to ImageNet stats.
+            mask: optional (B, H, W) bool tensor for the input image,
+                  True = padded / invalid position.  Kept as a parameter so
+                  callers can pass the collate mask without extra unpacking,
+                  but mask propagation to each scale is handled by the caller
+                  (model.py) after the backbone returns.
 
         Returns:
-            features: list of (B, C_i, H_i, W_i), one per stage in out_indices
-                      order (ascending stride).
-            out_masks: list of (B, H_i, W_i) bool tensors aligned with features.
-                       These are downsampled from the input mask (nearest-exact),
-                       so padded regions stay padded across all scales.
+            features: list of (B, C_i, H_i, W_i), one per stage in
+                      out_indices order (ascending stride).
         """
         assert x.dim() == 4 and x.size(1) == 3, (
             f"Expected input (B, 3, H, W), got {tuple(x.shape)}"
         )
-
-        features: List[torch.Tensor] = self.model(x)
-
-        out_masks: List[torch.Tensor] = []
-        for i, feat in enumerate(features):
-            _, _, H, W = feat.shape
-            if masks is not None:
-                src_mask = masks[i].float().unsqueeze(1)   # (B, 1, H_in, W_in)
-                scaled = F.interpolate(
-                    src_mask, size=(H, W), mode="nearest-exact"
-                ).squeeze(1).bool()
-            else:
-                scaled = torch.zeros(
-                    x.size(0), H, W, dtype=torch.bool, device=x.device
-                )
-            out_masks.append(scaled)
-
-        return features, out_masks
+        return self.model(x)
 
     # ------------------------------------------------------------------
     # Internal helpers

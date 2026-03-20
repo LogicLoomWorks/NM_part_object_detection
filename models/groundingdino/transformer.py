@@ -8,6 +8,13 @@ Exports: MLP, PositionEmbeddingSine,
 Bug fixed: cross_attn / self_attn in TransformerDecoderLayer were built with
 batch_first=True but tensors flow as (seq_len, batch, embed) throughout.
 Fix: batch_first=False on all nn.MultiheadAttention instances.
+
+Bug fixed: PositionEmbeddingSine.forward() did not accept a mask argument.
+Fix: add mask=None parameter (mask is unused but callers may pass it).
+
+Bug fixed: TransformerDecoder returned a raw tensor instead of (all_logits,
+all_boxes). Fix: class head + box MLP wired inside the decoder; forward()
+now returns (all_logits, all_boxes) each shaped (num_layers, B, Q, C).
 """
 
 import math
@@ -50,7 +57,9 @@ class PositionEmbeddingSine(nn.Module):
         self.normalize = normalize
         self.scale = scale or (2 * math.pi)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        # mask is accepted for API compatibility but not used —
+        # we always embed the full spatial grid.
         B, _, H, W = x.shape
         not_mask = torch.ones(B, H, W, device=x.device, dtype=torch.float32)
         y_embed = not_mask.cumsum(1)
@@ -133,10 +142,14 @@ class TransformerEncoder(nn.Module):
     def forward(self, src: torch.Tensor,
                 src_key_padding_mask=None,
                 pos: torch.Tensor | None = None) -> torch.Tensor:
-        x = src
+        # src arrives as (B, S, C) from model.py — transpose to seq-first
+        x = src.transpose(0, 1)                          # (S, B, C)
+        if pos is not None:
+            pos = pos.transpose(0, 1)                    # (S, B, C)
         for layer in self.layers:
             x = layer(x, src_key_padding_mask=src_key_padding_mask, pos=pos)
-        return self.norm(x)
+        x = self.norm(x)
+        return x.transpose(0, 1)                         # back to (B, S, C)
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +176,13 @@ class TransformerDecoderLayer(nn.Module):
                 memory_key_padding_mask=None,
                 pos: torch.Tensor | None = None,
                 query_pos: torch.Tensor | None = None) -> torch.Tensor:
-        tgt    = _seq_first_guard(tgt,    "tgt")
-        memory = _seq_first_guard(memory, "memory")
-        if pos       is not None: pos       = _seq_first_guard(pos,       "pos")
-        if query_pos is not None: query_pos = _seq_first_guard(query_pos, "query_pos")
-
+        """
+        Args:
+            tgt:       (Q, B, C) query tokens
+            memory:    (S, B, C) encoder output
+            pos:       (S, B, C) encoder positional embeddings
+            query_pos: (Q, B, C) query positional embeddings
+        """
         # self-attention
         q = k = tgt + query_pos if query_pos is not None else tgt
         tgt2, _ = self.self_attn(q, k, tgt)
@@ -198,18 +213,51 @@ class TransformerDecoder(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.return_intermediate = return_intermediate
 
-    def forward(self, tgt: torch.Tensor, memory: torch.Tensor,
-                memory_key_padding_mask=None,
-                pos: torch.Tensor | None = None,
-                query_pos: torch.Tensor | None = None):
-        x = tgt
-        intermediates = []
-        for layer in self.layers:
-            x = layer(x, memory,
+        # Per-layer prediction heads (one set per decoder layer)
+        self.class_heads = nn.ModuleList([
+            nn.Linear(d_model, num_classes) for _ in range(num_layers)
+        ])
+        self.box_heads = nn.ModuleList([
+            MLP(d_model, d_model, 4, num_layers=3) for _ in range(num_layers)
+        ])
+
+    def forward(self,
+                tgt:       torch.Tensor,        # (B, Q, C)
+                memory:    torch.Tensor,         # (B, S, C)
+                ref_pts:   torch.Tensor,         # (B, Q, 4)  sigmoid space
+                memory_key_padding_mask=None,    # (B, S)
+                pos:       torch.Tensor | None = None,        # (B, S, C)
+                query_pos: torch.Tensor | None = None):       # (B, Q, C)
+        """
+        Returns:
+            all_logits: list of (B, Q, num_classes), one per layer
+            all_boxes:  list of (B, Q, 4),           one per layer, values in [0,1]
+        """
+        # Transpose to seq-first for the MHA layers
+        x   = tgt.transpose(0, 1)                           # (Q, B, C)
+        mem = memory.transpose(0, 1)                        # (S, B, C)
+        if pos       is not None: pos       = pos.transpose(0, 1)        # (S, B, C)
+        if query_pos is not None: query_pos = query_pos.transpose(0, 1)  # (Q, B, C)
+
+        all_logits = []
+        all_boxes  = []
+
+        for layer, cls_head, box_head in zip(self.layers, self.class_heads, self.box_heads):
+            x = layer(x, mem,
                       memory_key_padding_mask=memory_key_padding_mask,
                       pos=pos, query_pos=query_pos)
-            if self.return_intermediate:
-                intermediates.append(self.norm(x))
-        if self.return_intermediate:
-            return torch.stack(intermediates)   # (num_layers, Q, B, C)
-        return self.norm(x).unsqueeze(0)        # (1, Q, B, C)
+
+            out = self.norm(x).transpose(0, 1)              # (B, Q, C)
+
+            logits = cls_head(out)                           # (B, Q, num_classes)
+
+            # Box refinement: predict delta in logit space, add to reference,
+            # then sigmoid back to [0, 1]
+            box_delta = box_head(out)                        # (B, Q, 4)
+            ref_logit = torch.log(ref_pts / (1.0 - ref_pts + 1e-8))  # inverse sigmoid
+            boxes = (ref_logit + box_delta).sigmoid()        # (B, Q, 4)  in [0,1]
+
+            all_logits.append(logits)
+            all_boxes.append(boxes)
+
+        return all_logits, all_boxes
