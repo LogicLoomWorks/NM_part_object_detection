@@ -41,7 +41,7 @@ def get_train_transforms(max_size: int = 800) -> A.Compose:
         ],
         bbox_params=A.BboxParams(
             format="coco",          # [x,y,w,h] — dataset converts to cx/cy/w/h after
-            label_fields=["labels"],
+            label_fields=["category_ids"],   # must match the key dataset.py passes
             min_visibility=0.1,
         ),
     )
@@ -64,7 +64,7 @@ def get_val_transforms(max_size: int = 800) -> A.Compose:
         ],
         bbox_params=A.BboxParams(
             format="coco",
-            label_fields=["labels"],
+            label_fields=["category_ids"],   # must match the key dataset.py passes
             min_visibility=0.1,
         ),
     )
