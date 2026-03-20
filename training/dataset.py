@@ -102,11 +102,11 @@ class COCODetectionDataset(Dataset):
             transformed = self.transforms(
                 image=image,
                 bboxes=bboxes,
-                labels=labels,
+                category_ids=labels,
             )
-            image = transformed["image"]          # Tensor [3, H, W]
-            bboxes = list(transformed["bboxes"])  # still in COCO xywh absolute format
-            labels = list(transformed["labels"])
+            image = transformed["image"]              # Tensor [3, H, W]
+            bboxes = list(transformed["bboxes"])      # still in COCO xywh absolute format
+            labels = list(transformed["category_ids"])
             _, height, width = image.shape
         else:
             height, width = image.shape[:2]
@@ -192,6 +192,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
             {
                 "boxes": sample["boxes"],
                 "labels": sample["labels"],
+                "image_id": sample["image_id"],
             }
         )
         image_ids.append(sample["image_id"])
@@ -200,7 +201,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
 
     return {
         "images": images,
-        "image_mask": image_mask,
+        "masks": image_mask,
         "targets": targets,
         "image_ids": image_ids,
         "orig_sizes": torch.stack(orig_sizes),
