@@ -13,6 +13,10 @@ Fixes applied
 
 3. PositionEmbeddingSine.forward signature   forward(self, x, mask=None)
    (was forward(self, x) – crashed when called with two args).
+
+4. build_model – was passing full cfg instead of cfg.model to GroundingDINOVisual.
+     OLD:  return GroundingDINOVisual(cfg)
+     NEW:  return GroundingDINOVisual(cfg.model)
 """
 from __future__ import annotations
 
@@ -293,7 +297,8 @@ GroundingDINO = GroundingDINOVisual
 # ── factory + checkpoint utils ───────────────────────────────────────────────
 
 def build_model(cfg: DictConfig) -> GroundingDINOVisual:
-    return GroundingDINOVisual(cfg)
+    # FIX #4: pass cfg.model, not the full cfg
+    return GroundingDINOVisual(cfg.model)
 
 
 def save_checkpoint(
