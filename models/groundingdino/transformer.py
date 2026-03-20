@@ -175,3 +175,41 @@ class TransformerDecoderLayer(nn.Module):
 
         # cross-attention
         q = tgt    + query_pos if query_pos is not None else tgt
+        k = memory + pos       if pos       is not None else memory
+        cross_out, _ = self.cross_attn(q, k, memory,
+                                       key_padding_mask=memory_key_padding_mask)
+        tgt = self.norm2(tgt + self.dropout2(cross_out))
+
+        # FFN
+        ff = self.linear2(self.dropout(F.relu(self.linear1(tgt))))
+        return self.norm3(tgt + self.dropout3(ff))
+
+
+class TransformerDecoder(nn.Module):
+    def __init__(self, d_model: int = 256, nhead: int = 8,
+                 dim_feedforward: int = 2048, dropout: float = 0.1,
+                 num_layers: int = 6, num_classes: int = 80,
+                 return_intermediate: bool = True):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+        self.return_intermediate = return_intermediate
+
+    def forward(self, tgt: torch.Tensor, memory: torch.Tensor,
+                memory_key_padding_mask=None,
+                pos: torch.Tensor | None = None,
+                query_pos: torch.Tensor | None = None):
+        x = tgt
+        intermediates = []
+        for layer in self.layers:
+            x = layer(x, memory,
+                      memory_key_padding_mask=memory_key_padding_mask,
+                      pos=pos, query_pos=query_pos)
+            if self.return_intermediate:
+                intermediates.append(self.norm(x))
+        if self.return_intermediate:
+            return torch.stack(intermediates)   # (num_layers, Q, B, C)
+        return self.norm(x).unsqueeze(0)        # (1, Q, B, C)
