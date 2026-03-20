@@ -80,13 +80,26 @@ def main() -> None:
     # ------------------------------------------------------------------
     if args.mode == "train":
         import pytorch_lightning as pl
+        from pytorch_lightning.callbacks import ModelCheckpoint
         from pytorch_lightning.loggers import CSVLogger
         from training.trainer import DetectionLightningModule
+
+        Path(cfg.training.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
         logger = CSVLogger(
             save_dir="logs",
             name="groundingdino_product_detector",
             version=args.backbone or "default",
+        )
+
+        checkpoint_cb = ModelCheckpoint(
+            dirpath=cfg.training.checkpoint_dir,
+            filename="best",
+            monitor="val/loss_total",
+            mode="min",
+            save_top_k=1,
+            save_last=True,       # also keeps last.ckpt for resuming
+            verbose=True,
         )
 
         module = DetectionLightningModule(cfg)
@@ -97,6 +110,7 @@ def main() -> None:
             log_every_n_steps=cfg.training.log_every_n_steps,
             default_root_dir=cfg.training.checkpoint_dir,
             logger=logger,
+            callbacks=[checkpoint_cb],
         )
         trainer.fit(module)
 

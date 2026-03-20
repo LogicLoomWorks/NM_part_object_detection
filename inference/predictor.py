@@ -17,7 +17,8 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
 from models.groundingdino.model import load_checkpoint
-from training.dataset import COCODetectionDataset, build_val_transforms, collate_fn
+from training.dataset import COCODetectionDataset, collate_fn
+from training.transforms import build_val_transforms
 from inference.postprocess import apply_nms, threshold_filter
 
 
@@ -105,7 +106,7 @@ class Predictor:
         coco_results: List[Dict] = []
         for batch in loader:
             images = batch["images"].to(self.device)
-            image_mask = batch.get("image_mask")
+            image_mask = batch.get("masks")          # fix: was "image_mask"
             if image_mask is not None:
                 image_mask = image_mask.to(self.device)
             _, _, H, W = images.shape

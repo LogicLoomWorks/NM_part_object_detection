@@ -14,11 +14,14 @@ Fixes applied
 3. PositionEmbeddingSine.forward signature   forward(self, x, mask=None)
    (was forward(self, x) – crashed when called with two args).
 """
+from __future__ import annotations
+
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from models.groundingdino.backbone import TimmBackbone
 from models.groundingdino.neck     import FPN
@@ -40,9 +43,6 @@ class PositionEmbeddingSine(nn.Module):
         self.normalize     = normalize
         self.scale         = 2 * 3.141592653589793
 
-    # FIX #1 — mask is now optional so both call-sites work:
-    #   pos_embed(feat)           ← sub-module probe cell
-    #   pos_embed(feat, mask)     ← _build_masks_and_pos
     def forward(self, x: torch.Tensor,
                 mask: torch.Tensor | None = None) -> torch.Tensor:
         B, C, H, W = x.shape
@@ -106,13 +106,13 @@ class GroundingDINOVisual(nn.Module):
     {
       'pred_logits': (B, Q, num_classes),
       'pred_boxes' : (B, Q, 4),          # cx/cy/w/h in [0,1]
-      'aux_outputs': [ {'pred_logits':…, 'pred_boxes':…}, … ]   # one per intermediate decoder layer
+      'aux_outputs': [ {'pred_logits':…, 'pred_boxes':…}, … ]
     }
     """
 
     def __init__(self, cfg: DictConfig):
         super().__init__()
-        mc   = cfg                          # model sub-config
+        mc   = cfg
         tc   = mc.transformer
         d    = tc.d_model                   # 256
 
@@ -154,7 +154,6 @@ class GroundingDINOVisual(nn.Module):
             dropout         = tc.dropout,
         )
 
-        # FIX #2 — decoder must have per-layer heads (wired below)
         self.decoder = TransformerDecoder(
             d_model            = d,
             nhead              = tc.nhead,
@@ -188,37 +187,34 @@ class GroundingDINOVisual(nn.Module):
     def _build_masks_and_pos(
         self,
         proj_feats: list[torch.Tensor],
-        src_mask:   torch.Tensor,           # (B, H_orig, W_orig) True=padded
+        src_mask:   torch.Tensor,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """
-        Downsample the image-level padding mask to each FPN level
-        and compute sinusoidal positional encodings.
-
-        Returns
-        -------
-        masks_list : list of (B, H_l, W_l)  True = padded
-        pos_list   : list of (B, C, H_l, W_l)
-        """
         masks_list, pos_list = [], []
         for feat in proj_feats:
             _, _, H, W = feat.shape
-            # interpolate keeps True-padded / False-valid convention
             m = F.interpolate(
                 src_mask.unsqueeze(1).float(), size=(H, W), mode="nearest"
-            ).squeeze(1).bool()                       # (B, H_l, W_l)
+            ).squeeze(1).bool()
             masks_list.append(m)
-            pos_list.append(self.pos_embed(feat, m))  # (B, C, H_l, W_l)
+            pos_list.append(self.pos_embed(feat, m))
         return masks_list, pos_list
 
     # ── forward ───────────────────────────────────────────────────────────────
 
     def forward(
         self,
-        images: torch.Tensor,   # (B, 3, H, W)
-        masks:  torch.Tensor,   # (B, H, W)  True = padded
+        images: torch.Tensor,
+        masks:  torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
 
         B = images.shape[0]
+
+        # Default to all-valid mask if none provided
+        if masks is None:
+            masks = torch.zeros(
+                B, images.shape[2], images.shape[3],
+                dtype=torch.bool, device=images.device,
+            )
 
         # 1. Backbone → FPN → projection
         bb_feats   = self.backbone(images)
@@ -228,68 +224,59 @@ class GroundingDINOVisual(nn.Module):
         # 2. Masks + positional encodings at each level
         masks_list, pos_list = self._build_masks_and_pos(proj_feats, masks)
 
-        # 3. Flatten + concatenate all levels
-        #    shapes: feat (B,C,H,W) → (B, H*W, C) → cat → (B, N, C)
+        # 3. Flatten + concatenate all levels → (B, N, C)
         src = torch.cat(
             [f.flatten(2).permute(0, 2, 1) for f in proj_feats], dim=1
-        )  # (B, N, C)
+        )
         pos_enc = torch.cat(
             [p.flatten(2).permute(0, 2, 1) for p in pos_list], dim=1
-        )  # (B, N, C)
-
-        # FIX #3 — key_padding_mask: True = padded (PyTorch convention)
-        #   masks_list[l] is already True=padded, so NO inversion needed.
+        )
         key_padding_mask = torch.cat(
             [m.flatten(1) for m in masks_list], dim=1
-        )  # (B, N)  True = padded → softmax → -inf → 0 weight  ✓
+        )  # (B, N)  True = padded
 
-        # 4. Encoder  (batch_first=False → transpose)
-        #    TransformerEncoder expects (S, B, C)
+        # 4. Encoder  (S, B, C)
         memory = self.encoder(
-            src.transpose(0, 1),              # (N, B, C)
+            src.transpose(0, 1),
             key_padding_mask = key_padding_mask,
             pos              = pos_enc.transpose(0, 1),
         )  # (N, B, C)
 
         # 5. Query initialisation
-        tgt       = self.tgt_embed.weight.unsqueeze(1).expand(-1, B, -1)   # (Q, B, C)
-        query_pos = self.query_embed.weight.unsqueeze(1).expand(-1, B, -1) # (Q, B, C)
-
-        ref_pts = (
+        tgt       = self.tgt_embed.weight.unsqueeze(1).expand(-1, B, -1)
+        query_pos = self.query_embed.weight.unsqueeze(1).expand(-1, B, -1)
+        ref_pts   = (
             self.reference_points.weight
             .sigmoid()
             .clamp(1e-4, 1 - 1e-4)
-            .unsqueeze(1).expand(-1, B, -1)   # (Q, B, 4)
+            .unsqueeze(1).expand(-1, B, -1)
         )
 
-        # 6. Decoder — returns (num_layers, Q, B, C) intermediate states
-        #    (TransformerDecoder with return_intermediate=True)
+        # 6. Decoder → (num_layers, Q, B, C)
         hs = self.decoder(
             tgt                      = tgt,
             memory                   = memory,
             memory_key_padding_mask  = key_padding_mask,
             pos                      = pos_enc.transpose(0, 1),
             query_pos                = query_pos,
-        )  # (num_layers, Q, B, C)
+        )
 
-        # 7. Per-layer heads → pred_logits + pred_boxes
-        #    ref_pts_expand: (Q, B, 4) → (B, Q, 4) for arithmetic
-        ref_pts_bq = ref_pts.permute(1, 0, 2)                    # (B, Q, 4)
-        ref_logit  = torch.log(ref_pts_bq / (1.0 - ref_pts_bq)) # inverse-sigmoid
+        # 7. Per-layer heads
+        ref_pts_bq = ref_pts.permute(1, 0, 2)
+        ref_logit  = torch.log(ref_pts_bq / (1.0 - ref_pts_bq))
 
         outputs_classes, outputs_coords = [], []
         for lvl in range(hs.shape[0]):
-            out = hs[lvl].permute(1, 0, 2)          # (B, Q, C)
-            logits = self.class_heads[lvl](out)      # (B, Q, num_classes)
-            delta  = self.box_heads[lvl](out)        # (B, Q, 4)
+            out    = hs[lvl].permute(1, 0, 2)
+            logits = self.class_heads[lvl](out)
+            delta  = self.box_heads[lvl](out)
             coords = (ref_logit + delta).sigmoid().clamp(0.0, 1.0)
             outputs_classes.append(logits)
             outputs_coords.append(coords)
 
-        # Last layer = primary output
-        out_dict: dict[str, object] = {
-            "pred_logits": outputs_classes[-1],   # (B, Q, num_classes)
-            "pred_boxes" : outputs_coords[-1],    # (B, Q, 4)
+        out_dict: dict = {
+            "pred_logits": outputs_classes[-1],
+            "pred_boxes" : outputs_coords[-1],
         }
         if self.aux_loss:
             out_dict["aux_outputs"] = [
@@ -299,7 +286,56 @@ class GroundingDINOVisual(nn.Module):
         return out_dict
 
 
-# ── factory ───────────────────────────────────────────────────────────────────
+# ── convenience alias ─────────────────────────────────────────────────────────
+GroundingDINO = GroundingDINOVisual
+
+
+# ── factory + checkpoint utils ───────────────────────────────────────────────
 
 def build_model(cfg: DictConfig) -> GroundingDINOVisual:
     return GroundingDINOVisual(cfg)
+
+
+def save_checkpoint(
+    model: GroundingDINOVisual,
+    path: str,
+    cfg: DictConfig | None = None,
+) -> None:
+    """Save model weights and optionally the config."""
+    payload = {"model_state_dict": model.state_dict()}
+    if cfg is not None:
+        payload["cfg"] = OmegaConf.to_container(cfg, resolve=True)
+    torch.save(payload, path)
+
+
+def load_checkpoint(
+    path: str,
+    cfg: DictConfig,
+    device: Optional[str] = None,
+) -> tuple[GroundingDINOVisual, dict]:
+    """Load a checkpoint saved by save_checkpoint or Lightning's ModelCheckpoint.
+
+    Returns:
+        model   — GroundingDINOVisual instance with weights loaded, in eval mode
+        payload — the raw checkpoint dict
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    payload = torch.load(path, map_location=device)
+
+    model = build_model(cfg)
+
+    # Support both raw state dicts and Lightning checkpoints
+    if "state_dict" in payload:
+        # Lightning saves weights with 'model.' prefix from DetectionLightningModule
+        state = {
+            k.removeprefix("model."): v
+            for k, v in payload["state_dict"].items()
+        }
+    elif "model_state_dict" in payload:
+        state = payload["model_state_dict"]
+    else:
+        state = payload
+
+    model.load_state_dict(state)
+    model.to(device).eval()
+    return model, payload

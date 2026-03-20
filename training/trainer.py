@@ -9,7 +9,7 @@ Handles:
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -17,13 +17,12 @@ from torch.utils.data import DataLoader, Subset
 import pytorch_lightning as pl
 
 from models.groundingdino.matcher import HungarianMatcher
-from models.groundingdino.model import GroundingDINO, build_model
-from training.dataset import (
-    COCODetectionDataset,
-    build_train_transforms,
-    build_val_transforms,
-    collate_fn,
-)
+from models.groundingdino.model import build_model
+
+if TYPE_CHECKING:
+    from models.groundingdino.model import GroundingDINO
+from training.dataset import COCODetectionDataset, collate_fn
+from training.transforms import build_train_transforms, build_val_transforms
 from training.losses import SetCriterion
 
 
@@ -79,7 +78,7 @@ class DetectionLightningModule(pl.LightningModule):
 
     def _shared_step(self, batch: Dict, stage: str) -> torch.Tensor:
         images = batch["images"].to(self.device)
-        image_mask = batch.get("image_mask")
+        image_mask = batch.get("masks")
         if image_mask is not None:
             image_mask = image_mask.to(self.device)
 
