@@ -1,0 +1,97 @@
+### For predict
+
+Predict: python run.py --config configs/default.yaml infer --input <image_path> --output <output_path>
+
+
+
+
+# Training & Submission Recipe
+
+## 1 — Start Training
+
+```bash
+python run.py --config configs/default.yaml
+```
+
+Or if invoking the trainer directly:
+
+```bash
+python -m training.trainer --config configs/default.yaml               -------------------------------------------  FOR Å KJØRE
+```
+
+---
+
+## 2 — During Training — What to Watch
+
+- Loss should decrease within epoch 1–2. If it stays flat or explodes, check the LR split (`backbone_lr=1e-5` vs `base_lr=1e-4`).
+- All aux losses should move together with the main loss. If one diverges, there is a decoder wiring issue.
+- Checkpoints save automatically to `models/checkpoints/`.
+
+---
+
+## 3 — After Training
+
+Run inference and evaluation:
+
+```bash
+python inference/predictor.py --checkpoint models/checkpoints/best.pth
+```
+
+Check **mAP, mAP50, mAP75** via `COCOeval`. Scoring is 70% detection + 30% classification — prioritize mAP50 as your main signal.
+
+---
+
+## 4 — If Results Are Weak
+
+Two highest-impact levers:
+
+1. Increase `max_size` back to `800` in `configs/default.yaml` (you reduced it to 320 for debugging).
+2. Switch backbone to `resnet101` or `convnext_base` using the configs in `configs/backbone/`.
+
+---
+
+## 5 — Prepare Submission
+
+```bash
+cp models/checkpoints/best.pth models/final/
+```
+
+Then run `run.py` to produce final predictions for scoring.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Epoch 0/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 199/199 0:21:49 • 0:00:00 0.12it/s v_num: ault train/loss_total: 33.635Epoch 0, global step 199: 'val/loss_total' reached 35.67627 (best 35.67627), saving model to '/home/gutenbye/Documents/UIT/Semester_2/NMAI/priv_proj/models/checkpoints/best.ckpt' as top 1
+Epoch 1/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 199/199 0:21:45 • 0:00:00 0.17it/s v_num: ault train/loss_total: 24.519 val/loss_total: 25.582Epoch 1, global step 398: 'val/loss_total' reached 25.58218 (best 25.58218), saving model to '/home/gutenbye/Documents/UIT/Semester_2/NMAI/priv_proj/models/checkpoints/best.ckpt' as top 1
+
+
+
+
+
+
+
+
+
+

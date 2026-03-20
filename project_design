@@ -1,0 +1,310 @@
+PROJECT DESIGN SUMMARY
+
+  Purpose
+
+  End-to-end object detector for retail shelf product detection. Inspired by GroundingDINO/DETR, trained from scratch on a custom COCO-format dataset. No text/language grounding —
+  pure visual detection only.
+
+  ---
+  Dataset
+
+  - Path: data/raw/coco_dataset/train/ — single split used; train/val is done in code
+  - Annotations: annotations.json (COCO format)
+  - Images: images/img_NNNNN.jpg
+  - Stats: 248 images, 22,731 annotations, 356 product categories
+  - Category IDs are remapped to contiguous 0-indexed labels: cat_id_to_idx / idx_to_cat_id dicts on the dataset object
+
+  ---
+  Directory Layout
+
+  priv_proj/
+  ├── configs/
+  │   ├── default.yaml               # master config (OmegaConf)
+  │   └── backbone/
+  │       ├── resnet50.yaml
+  │       ├── resnet101.yaml
+  │       └── convnext_base.yaml
+  ├── models/
+  │   ├── __init__.py                # lazy-load GroundingDINO, build_model
+  │   └── groundingdino/
+  │       ├── __init__.py            # lazy-load heavy + light symbols
+  │       ├── model.py               # GroundingDINO, build_model, save/load_checkpoint
+  │       ├── backbone.py            # TimmBackbone, build_backbone
+  │       ├── neck.py                # FPN, build_neck
+  │       ├── transformer.py         # MLP, PositionEmbeddingSine, Encoder, Decoder
+  │       └── matcher.py             # HungarianMatcher, box utils, GIoU
+  ├── training/
+  │   ├── dataset.py                 # COCODetectionDataset, collate_fn, builders
+  │   ├── transforms.py              # Albumentations train/val pipelines
+  │   ├── losses.py                  # sigmoid_focal_loss, SetCriterion
+  │   └── trainer.py                 # DetectionLightningModule (pl.LightningModule)
+  ├── inference/
+  │   ├── predictor.py               # Predictor (predict_image, evaluate), run_inference, run_evaluation
+  │   └── postprocess.py             # threshold_filter, apply_nms
+  ├── notebooks/
+  │   └── 02_debug_model.ipynb       # end-to-end sanity check (this is what to regenerate)
+  ├── models/checkpoints/            # .gitkeep
+  ├── models/final/                  # .gitkeep
+  ├── models/pretrained/             # .gitkeep
+  └── experiments/                   # .gitkeep
+
+  ---
+  Config (configs/default.yaml, loaded via OmegaConf.load)
+
+  model:
+    backbone:
+      name: resnet50
+      pretrained: true
+      freeze_at: 1
+      out_indices: [1, 2, 3]   # timm stage indices → channels [256, 512, 1024]
+    neck:
+      out_channels: 256
+      num_levels: 4            # 3 backbone levels + 1 extra stride-2 P6
+    transformer:
+      d_model: 256
+      nhead: 8
+      num_encoder_layers: 6
+      num_decoder_layers: 6
+      dim_feedforward: 2048
+      dropout: 0.1
+    num_classes: 356
+    num_queries: 300
+    aux_loss: true
+  data:
+    ann_file: data/raw/coco_dataset/train/annotations.json
+    img_dir: data/raw/coco_dataset/train/images
+    max_size: 800
+    num_workers: 4
+    batch_size: 2
+    val_split: 0.2
+    seed: 42
+  training:
+    max_epochs: 50
+    base_lr: 1.0e-4
+    backbone_lr: 1.0e-5
+    weight_decay: 1.0e-4
+    grad_clip: 0.1
+    lr_milestones: [40]
+    lr_gamma: 0.1
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    matcher:
+      cost_class: 2.0
+      cost_bbox: 5.0
+      cost_giou: 2.0
+    loss_weights:
+      loss_ce: 2.0
+      loss_bbox: 5.0
+      loss_giou: 2.0
+    checkpoint_dir: models/checkpoints
+    log_every_n_steps: 10
+  inference:
+    threshold: 0.3
+    nms_threshold: 0.5
+    top_k: 300
+    device: null
+
+  ---
+  Model Architecture (models/groundingdino/model.py)
+
+  GroundingDINO(nn.Module) — 5-stage pipeline:
+
+  1. Backbone → TimmBackbone(name, out_indices=[1,2,3], pretrained, freeze_at=1) wraps a timm.create_model(..., features_only=True). Returns (features, out_masks) where features is
+   a list of (B, C_i, H_i, W_i). ResNet50 gives channels [256, 512, 1024] at strides [8, 16, 32]. Mask convention: True = padded/invalid.
+  2. Neck → FPN(in_channels=[256,512,1024], out_channels=256, num_levels=4). Top-down lateral merges for 3 levels + 1 extra stride-2 P6 level appended. All outputs are (B, 256,
+  H_i, W_i).
+  3. Input projection → ModuleList of 4 × [Conv2d(256→256,1), GroupNorm(32,256)], one per FPN level. Xavier-uniform init on conv weights.
+  4. Position embeddings → PositionEmbeddingSine(num_pos_feats=128). CRITICAL: the current transformer.py signature is forward(self, x: torch.Tensor) -> torch.Tensor — it takes
+  only the feature map (ignores any mask). However model._build_masks_and_pos calls self.pos_embed(feat, m) passing a mask as a second positional argument. This is the known bug
+  tracked in the notebook (produces TypeError: PositionEmbeddingSine.forward() takes 2 positional arguments but 3 were given). The fix is to update PositionEmbeddingSine.forward to
+   accept mask=None as an optional second argument and use it if provided (or ignore it). The output is (B, d_model, H, W).
+  5. Encoder → TransformerEncoder(6 × TransformerEncoderLayer). Operates on (total_HW, B, d_model) seq-first tensors (batch_first=False throughout). Each layer: self-attention with
+   additive positional encoding on Q and K, followed by FFN + LayerNorm.
+  6. Decoder → TransformerDecoder(6 × TransformerDecoderLayer, return_intermediate=True). Also seq-first. Each layer: self-attention on queries + cross-attention to encoder memory,
+   FFN. Returns torch.stack(intermediates) of shape (num_layers, Q, B, C) — the GroundingDINO.forward post-processes this via the per-layer class/box heads.
+
+  6. Note: TransformerDecoder in the current code does NOT have the box-refinement MLP heads inside it. Those are on GroundingDINO itself... Actually on closer reading the current
+  TransformerDecoder returns raw feature tensors, and GroundingDINO has no explicit per-layer class/box heads defined in __init__. The current model builds the class head as a
+  simple linear later applied to the decoder output. The current code uses all_logits, all_boxes = self.decoder(...) but TransformerDecoder.forward only returns one tensor (the
+  stacked intermediates) — this is another mismatch to flag and fix.
+  7. Output heads (on GroundingDINO): pred_logits: (B, Q, num_classes) and pred_boxes: (B, Q, 4) in normalised cx/cy/w/h.
+  8. Reference points: nn.Embedding(300, 4) init uniform_(0.05, 0.95). In forward: .sigmoid().clamp(1e-4, 1-1e-4).
+  9. build_model(cfg) — factory in model.py, assembles all submodules from config.
+  10. Checkpoint I/O: save_checkpoint stores state_dict + backbone_name + num_classes + num_queries + epoch + metrics + cfg. load_checkpoint validates backbone/class compatibility
+  before loading.
+
+  ---
+  Data Pipeline (training/dataset.py, training/transforms.py)
+
+  COCODetectionDataset(Dataset):
+  - Uses pycocotools.COCO to load annotations
+  - Filters images with zero annotations
+  - Remaps category IDs to contiguous 0-indexed labels
+  - Images loaded via cv2 (BGR→RGB)
+  - Box format INSIDE Albumentations: COCO [x, y, w, h] absolute. Box format RETURNED: normalised [cx, cy, w, h] in [0, 1]
+  - Returns dict: {image, boxes, labels, image_id, orig_size, size}
+
+  collate_fn: pads images to max (H, W) in batch. Returns {images, image_mask, targets, image_ids, orig_sizes, sizes}. Mask: False = valid pixel, True = padded.
+
+  build_train_transforms(max_size=800): LongestMaxSize → PadIfNeeded(div32) → HorizontalFlip(p=0.5) → OneOfp=0.5 → OneOfp=0.2 → Normalize(ImageNet) → ToTensorV2
+
+  build_val_transforms(max_size=800): LongestMaxSize → PadIfNeeded(div32) → Normalize(ImageNet) → ToTensorV2
+
+  ImageNet stats: mean [0.485, 0.456, 0.406], std [0.229, 0.224, 0.225]
+
+  ---
+  Training Flow (training/trainer.py, training/losses.py)
+
+  DetectionLightningModule(pl.LightningModule):
+  - Builds GroundingDINO + HungarianMatcher + SetCriterion from config
+  - configure_optimizers: AdamW with two param groups — backbone at 1e-5, rest at 1e-4, weight_decay=1e-4, MultiStepLR at epoch 40 ×0.1
+  - setup(): probes dataset size, makes reproducible train/val split (seed=42, 80/20), creates two separate dataset instances with different transforms
+  - _shared_step: forward → SetCriterion → log all losses including loss_total
+
+  SetCriterion:
+  1. Runs HungarianMatcher on final decoder output
+  2. _loss_class: sigmoid focal over ALL (B, Q, num_classes) — matched queries get 1-hot target, unmatched get zeros (background)
+  3. _loss_boxes: L1 + GIoU on matched pairs only. Uses _safe_box_for_giou to clamp degenerate boxes
+  4. Repeats steps 1-3 for each aux decoder layer (named loss_ce_0..4, loss_bbox_0..4, loss_giou_0..4)
+  5. Returns losses dict + loss_total (weighted sum using weight_dict)
+
+  HungarianMatcher: fp32 cast, focal classification cost + L1 + GIoU, scipy.optimize.linear_sum_assignment per image. Fast path for empty GT batches. NaN guard on cost matrix.
+
+  Weight dict (both final and all 5 aux layers): loss_ce=2.0, loss_bbox=5.0, loss_giou=2.0
+
+  ---
+  Inference Flow (inference/predictor.py, inference/postprocess.py)
+
+  Predictor: loads checkpoint, wraps predict_image (single image) and evaluate (full COCO eval).
+
+  - predict_image: val transforms → forward → threshold_filter(threshold=0.3, top_k=300) → apply_nms(iou=0.5) → scale boxes back to original pixel coords (xyxy absolute)
+  - evaluate: DataLoader → batched forward → COCO result format → pycocotools.COCOeval → returns {mAP, mAP_50, mAP_75}
+
+  threshold_filter: sigmoid logits → per-query max class score → threshold mask → top-k. Returns list of {scores, labels, boxes}.
+
+  apply_nms: torchvision.ops.batched_nms (class-aware), boxes converted cxcywh→xyxy internally, returned in original cxcywh format.
+
+  ---
+  Known Bugs (active in the codebase at time of last notebook run)
+
+  1. PositionEmbeddingSine.forward signature mismatch (the bug tracked in the notebook): transformer.py declares forward(self, x) (1 arg), but model._build_masks_and_pos calls
+  self.pos_embed(feat, m) (2 args). Fix: add mask=None optional second argument to PositionEmbeddingSine.forward; use the mask when provided to derive not_mask instead of
+  hardcoding all-ones.
+  2. TransformerDecoder.forward returns a single tensor but GroundingDINO.forward unpacks it as all_logits, all_boxes = self.decoder(...). This means either there are missing
+  class/box head MLPs on the decoder or on GroundingDINO that need to be wired up.
+  3. batch_first=False throughout: fixed in current transformer.py — all nn.MultiheadAttention instances use batch_first=False. All tensors must be (seq_len, B, C) when entering
+  encoder/decoder layers.
+  4. Reference point init: fixed — nn.init.uniform_(self.reference_points.weight, 0.05, 0.95) prevents inverse_sigmoid from producing ±inf on the first forward pass.
+
+  ---
+  What notebooks/02_debug_model.ipynb Should Do
+
+  The notebook is a step-by-step sanity check that the entire pipeline works end-to-end before running the full trainer. It should be runnable on CPU (no GPU required). Structure:
+
+  Cell 0 — Title markdown: # 02 — Debug Model with numbered step list
+
+  Cell 1 — Imports + ROOT resolution:
+  import sys
+  from pathlib import Path
+  import torch
+  import numpy as np
+  import matplotlib.pyplot as plt
+  import matplotlib.patches as patches
+  from omegaconf import OmegaConf
+
+  ROOT = Path.cwd()
+  if ROOT.name == "notebooks":
+      ROOT = ROOT.parent
+  sys.path.insert(0, str(ROOT))
+
+  print(f"Project root  : {ROOT}")
+  print(f"PyTorch       : {torch.__version__}")
+  print(f"CUDA available: {torch.cuda.is_available()}")
+
+  Section 1 — Load config: OmegaConf.load(ROOT / "configs" / "default.yaml"), print YAML
+
+  Section 2 — Build dataset: COCODetectionDataset with build_val_transforms, print len(dataset), len(dataset.cat_id_to_idx), sample of label map
+
+  Section 3 — DataLoader + batch: Subset(dataset, range(4)), DataLoader(batch_size=2, num_workers=0, collate_fn=collate_fn). Print all batch key shapes, per-sample box/label
+  counts.
+
+  Section 4 — Visualize GT boxes: Denormalize images (undo ImageNet stats), blank padded regions, draw cx/cy/w/h boxes converted to pixel x1/y1/w/h rectangles via matplotlib
+  patches. Show label IDs as text.
+
+  Section 5 — Build model: build_model(cfg), print total/trainable/backbone param counts, confirm output shapes are consistent with config.
+
+  Section 6 — Forward pass (the critical section):
+  - Downscale images to (320, 320) for CPU (avoids OOM on full-res attention)
+  - Downscale image_mask to match
+  - with torch.no_grad(): outputs = model(images_small, mask_small)
+  - Print pred_logits.shape, pred_boxes.shape, number of aux outputs
+  - Print min/max/mean of pred_boxes
+  - Print top-5 sigmoid scores per image
+  - If the PositionEmbeddingSine bug is still present, the cell should catch the TypeError and print a clear diagnostic, then show the fix
+
+  Section 7 — Tensor health check: check torch.isnan and torch.isinf for pred_logits, pred_boxes, and each aux_outputs layer. Assert all finite.
+
+  Section 8 — Compute losses: Mirror DetectionLightningModule.__init__ exactly — build HungarianMatcher and SetCriterion from config, run criterion(outputs, targets), print all
+  loss keys with raw values and weights.
+
+  Section 9 — Layer-by-layer debug probe (the manual diagnostic that bypasses model.forward to pinpoint NaN sources):
+  - Backbone + neck manually
+  - Input projections + pos_embed(projected) (single-arg call)
+  - Flatten to (HW, B, C) seq-first
+  - Walk encoder layers one by one, printing NaN count / min / max per layer
+  - Prepare decoder inputs: tgt_embed.weight.unsqueeze(1).expand(-1, B, -1), same for query_embed, reference_points.weight.sigmoid()
+  - Walk decoder layers, asserting all tensors are seq-first (seq_len, B, C)
+  - Print ✓ pass or ^^^ NaN INTRODUCED HERE ^^^ per layer
+
+  Section 10 — Cross-attention inspector (optional): print batch_first, embed_dim, num_heads of model.decoder.layers[0].cross_attn
+
+  ---
+  Important Implementation Notes for Notebook Generation
+
+  1. All imports use the actual module paths: from training.dataset import ..., from models.groundingdino.model import build_model, etc.
+  2. sys.path.insert(0, str(ROOT)) must come before any project imports.
+  3. The notebook runs without CUDA — the environment has torch 2.2.2+cpu. Use torch.no_grad() and downscale to 320×320 for the forward pass.
+  4. num_workers=0 in the debug DataLoader — avoids multiprocessing issues in notebooks.
+  5. The transformer module imports trigger a HuggingFace warning ("PyTorch was not found. Models won't be available...") — this is benign noise from a HuggingFace tokenizers
+  side-import. The notebook should note this is expected.
+  6. PositionEmbeddingSine must be called with 1 argument in the manual debug probe — model.pos_embed(projected) not model.pos_embed(projected, mask) — until the signature is
+  fixed.
+  7. Box coordinate conventions: Dataset/targets use normalised cx/cy/w/h. Visualisation converts to pixel x1/y1 for matplotlib. Inference converts to absolute x1/y1/x2/y2.
+  8. Mask convention: False = valid pixel, True = padded (PyTorch MHA convention for key_padding_mask). The dataset collate_fn produces this. Inside model.forward, the mask is
+  negated (~m) before being passed to MHA.
+
+
+
+
+
+
+
+
+  roter og gjør ting med dataen
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

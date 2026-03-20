@@ -84,10 +84,12 @@ class DetectionLightningModule(pl.LightningModule):
 
         outputs = self.model(images, image_mask)
         targets = [
-            {k: v.to(self.device) for k, v in t.items()}
+            {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+             for k, v in t.items()}
             for t in batch["targets"]
         ]
         losses = self.criterion(outputs, targets)
+        losses["loss_total"] = sum(losses.values())
 
         for k, v in losses.items():
             self.log(
@@ -193,3 +195,37 @@ class DetectionLightningModule(pl.LightningModule):
             collate_fn=collate_fn,
             pin_memory=True,
         )
+
+
+if __name__ == "__main__":
+    import argparse
+    from omegaconf import OmegaConf
+    from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Path to YAML config file")
+    args = parser.parse_args()
+
+    cfg = OmegaConf.load(args.config)
+
+    module = DetectionLightningModule(cfg)
+
+    checkpoint_cb = ModelCheckpoint(
+        dirpath=cfg.training.checkpoint_dir,
+        filename="epoch={epoch:02d}-val_loss={val/loss_total:.4f}",
+        monitor="val/loss_total",
+        mode="min",
+        save_top_k=3,
+        auto_insert_metric_name=False,
+    )
+    lr_monitor = LearningRateMonitor(logging_interval="step")
+
+    trainer = pl.Trainer(
+        max_epochs=cfg.training.max_epochs,
+        gradient_clip_val=cfg.training.grad_clip,
+        log_every_n_steps=cfg.training.log_every_n_steps,
+        callbacks=[checkpoint_cb, lr_monitor],
+        default_root_dir=cfg.training.checkpoint_dir,
+    )
+
+    trainer.fit(module)

@@ -3,10 +3,13 @@ model:
     name: resnet50
     pretrained: true
     freeze_at: 1
-    out_indices: [2, 3, 4]  # stages 2-4 (strides 8/16/32) → 3 feature maps feeding the FPN
+    out_indices:
+    - 2
+    - 3
+    - 4
   neck:
     out_channels: 256
-    num_levels: 4            # 3 from backbone + 1 extra stride-2 level
+    num_levels: 4
   transformer:
     d_model: 256
     nhead: 8
@@ -17,7 +20,6 @@ model:
   num_classes: 356
   num_queries: 300
   aux_loss: true
-
 data:
   ann_file: data/raw/coco_dataset/train/annotations.json
   img_dir: data/raw/coco_dataset/train/images
@@ -26,14 +28,14 @@ data:
   batch_size: 1
   val_split: 0.2
   seed: 42
-
 training:
-  max_epochs: 10
-  base_lr: 1.0e-4
-  backbone_lr: 1.0e-5
-  weight_decay: 1.0e-4
+  max_epochs: 50
+  base_lr: 0.0001
+  backbone_lr: 1.0e-05
+  weight_decay: 0.0001
   grad_clip: 0.1
-  lr_milestones: [40]
+  lr_milestones:
+  - 40
   lr_gamma: 0.1
   focal_alpha: 0.25
   focal_gamma: 2.0
@@ -47,9 +49,8 @@ training:
     loss_giou: 2.0
   checkpoint_dir: models/checkpoints
   log_every_n_steps: 10
-
 inference:
   threshold: 0.3
   nms_threshold: 0.5
   top_k: 300
-  device: null  # null = auto-detect (cuda if available, else cpu)
+  device: null
