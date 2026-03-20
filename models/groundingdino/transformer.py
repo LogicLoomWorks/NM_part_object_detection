@@ -254,8 +254,9 @@ class TransformerDecoder(nn.Module):
             # Box refinement: predict delta in logit space, add to reference,
             # then sigmoid back to [0, 1]
             box_delta = box_head(out)                        # (B, Q, 4)
-            ref_logit = torch.log(ref_pts / (1.0 - ref_pts + 1e-8))  # inverse sigmoid
-            boxes = (ref_logit + box_delta).sigmoid()        # (B, Q, 4)  in [0,1]
+            ref_clamped = ref_pts.clamp(1e-4, 1.0 - 1e-4)
+            ref_logit = torch.log(ref_clamped / (1.0 - ref_clamped))  # inverse sigmoid
+            boxes = (ref_logit + box_delta).sigmoid().clamp(0.0, 1.0) # (B, Q, 4)  in [0,1]
 
             all_logits.append(logits)
             all_boxes.append(boxes)
