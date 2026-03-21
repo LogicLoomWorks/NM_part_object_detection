@@ -289,7 +289,20 @@ PROJECT DESIGN SUMMARY
 
 
 
+modeller:
+- SAM
+- DEIMv2
 
+
+
+dino-detection
+
+- eva-02
+- rt-detrv2
+- groundingdino
+- deformable_detr
+- yolov8
+- RT-DETR
 
 
 

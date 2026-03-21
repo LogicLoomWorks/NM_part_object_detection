@@ -29,7 +29,7 @@ data:
   val_split: 0.2
   seed: 42
 training:
-  max_epochs: 50
+  max_epochs: 10
   base_lr: 0.0001
   backbone_lr: 1.0e-05
   weight_decay: 0.0001

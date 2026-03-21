@@ -28,7 +28,7 @@ data:
   seed: 42
 
 training:
-  max_epochs: 10
+  max_epochs: 25
   base_lr: 1.0e-4
   backbone_lr: 1.0e-5
   weight_decay: 1.0e-4

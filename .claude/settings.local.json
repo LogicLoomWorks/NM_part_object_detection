@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python*)",
+      "Bash(.venv/bin/python*)",
+      "Bash(pip*)",
+      "Bash(.venv/bin/pip*)",
+      "Bash(ls*)",
+      "Bash(cat*)",
+      "Bash(find*)",
+      "Bash(grep*)",
+      "Bash(cp*)",
+      "Bash(mv*)",
+      "Bash(mkdir*)",
+      "Bash(nvidia-smi)",
+      "Read(**)",
+      "Write(**)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import scipy; print\\(''scipy:'', scipy.__version__\\)\")",
+      "Bash(python -c \"import timm; print\\(''timm:'', timm.__version__\\)\")",
+      "Bash(python -c \"import cv2; print\\(''cv2:'', cv2.__version__\\)\")",
+      "Bash(python:*)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python -c \"\nimport torch, torchvision, torchaudio, pytorch_lightning, albumentations, omegaconf, scipy, timm, cv2, pycocotools, numpy\nprint\\('torch:', torch.__version__, '| CUDA available:', torch.cuda.is_available\\(\\), '| GPU:', torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else 'N/A'\\)\nprint\\('torchvision:', torchvision.__version__\\)\nprint\\('torchaudio:', torchaudio.__version__\\)\nprint\\('pytorch_lightning:', pytorch_lightning.__version__\\)\nprint\\('albumentations:', albumentations.__version__\\)\nprint\\('omegaconf:', omegaconf.__version__\\)\nprint\\('scipy:', scipy.__version__\\)\nprint\\('timm:', timm.__version__\\)\nprint\\('cv2:', cv2.__version__\\)\nprint\\('numpy:', numpy.__version__\\)\nprint\\('pycocotools: ok'\\)\n\" 2>&1)",
+      "Bash(.venv/Scripts/python run.py train)",
+      "Bash(.venv/Scripts/python -c \"import numpy, torch, torchvision, torchaudio, pytorch_lightning, albumentations, omegaconf, scipy, timm, cv2, pycocotools; print\\('all ok'\\)\" 2>&1)",
+      "Bash(.venv/Scripts/python -c \"\nimport json\nfiles = [\n    'kladd.ipynb',\n    'notebooks/02_debug_model.ipynb',\n    'notebooks/debug_notebook.ipynb',\n    'visualizations.ipynb'\n]\nimports = set\\(\\)\nfor f in files:\n    try:\n        nb = json.load\\(open\\(f\\)\\)\n        for cell in nb.get\\('cells', []\\):\n            if cell['cell_type'] == 'code':\n                for line in cell['source']:\n                    line = line.strip\\(\\)\n                    if line.startswith\\('import '\\) or line.startswith\\('from '\\):\n                        imports.add\\(line\\)\n    except Exception as e:\n        print\\(f'Error reading {f}: {e}'\\)\nfor i in sorted\\(imports\\): print\\(i\\)\n\")",
+      "Bash(.venv/Scripts/python -c \"\nimport matplotlib, pandas, plotly, seaborn, sklearn, wandb, mlflow, tensorboard, hydra, kornia, supervision, ultralytics, ipykernel, fiftyone, labelme, PIL, tqdm, rich\nprint\\('all ok'\\)\n\" 2>&1)",
+      "Bash(.venv/Scripts/python.exe run.py train)"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(curl*)",
+      "Bash(wget*)"
+    ]
+  }
+}
