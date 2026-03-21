@@ -1,0 +1,66 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# YOLOv8x config
+#
+# model.name / model.num_classes are consumed by YOLOv8xDetector.
+# The backbone/neck/transformer sub-trees mirror default.yaml so the current
+# (GroundingDINO-based) trainer can run until the trainer is patched to
+# dispatch through MODEL_REGISTRY.
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  name: yolov8x
+  num_classes: 356
+  num_queries: 8400          # anchors at 640×640; adjusted dynamically in wrapper
+  aux_loss: false
+  # ── Kept for GroundingDINO trainer compat (will be ignored by wrapper) ──
+  backbone:
+    name: resnet50
+    pretrained: true
+    freeze_at: 1
+    out_indices: [2, 3, 4]
+  neck:
+    out_channels: 256
+    num_levels: 4
+  transformer:
+    d_model: 256
+    nhead: 8
+    num_encoder_layers: 6
+    num_decoder_layers: 6
+    dim_feedforward: 2048
+    dropout: 0.1
+
+data:
+  ann_file: data/raw/coco_dataset/train/annotations.json
+  img_dir:  data/raw/coco_dataset/train/images
+  max_size: 640
+  num_workers: 4
+  batch_size: 2
+  val_split: 0.2
+  seed: 42
+
+training:
+  max_epochs: 25
+  base_lr: 1.0e-4
+  backbone_lr: 1.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 0.1
+  lr_milestones: [40]
+  lr_gamma: 0.1
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  matcher:
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+  loss_weights:
+    loss_ce: 2.0
+    loss_bbox: 5.0
+    loss_giou: 2.0
+  checkpoint_dir: models/checkpoints/yolov8x
+  log_every_n_steps: 10
+
+inference:
+  threshold: 0.3
+  nms_threshold: 0.5
+  top_k: 300
+  device: null

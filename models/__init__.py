@@ -24,12 +24,22 @@ def _build_groundingdino(cfg):
 
 
 def _build_deimv2(cfg):
-    from models.deimv2.model import build_model  # noqa: PLC0415
+    from models.DEIMv2.model import build_model  # noqa: PLC0415
     return build_model(cfg)
 
 
 def _build_sam(cfg):
     from models.sam.model import build_model  # noqa: PLC0415
+    return build_model(cfg)
+
+
+def _build_yolov8x(cfg):
+    from models.yolov8x.model import build_model  # noqa: PLC0415
+    return build_model(cfg)
+
+
+def _build_rtdetr(cfg):
+    from models.rtdetr.model import build_model  # noqa: PLC0415
     return build_model(cfg)
 
 
@@ -40,6 +50,8 @@ MODEL_REGISTRY: dict[str, callable] = {
     "groundingdino": _build_groundingdino,
     "deimv2":        _build_deimv2,
     "sam":           _build_sam,
+    "yolov8x":       _build_yolov8x,
+    "rtdetr":        _build_rtdetr,
 }
 
 

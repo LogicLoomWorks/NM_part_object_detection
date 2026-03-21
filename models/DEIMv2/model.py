@@ -32,14 +32,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 
-from models.deimv2.backbone    import TimmBackbone
-from models.deimv2.neck        import FPN
-from models.deimv2.transformer import (
+from models.DEIMv2.backbone    import TimmBackbone
+from models.DEIMv2.neck        import FPN
+from models.DEIMv2.transformer import (
     DeformableTransformerEncoder,
     DINODecoder,
     _mlp,
 )
-from models.deimv2.cdn import ContrastiveDenoisingTraining
+from models.DEIMv2.cdn import ContrastiveDenoisingTraining
 
 
 # ──────────────────────────────────────────────────────────────────────────────
