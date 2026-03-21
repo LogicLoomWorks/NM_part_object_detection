@@ -38,7 +38,7 @@ MODELS = {
     # ── SAM ───────────────────────────────────────────────────────────────────
     # SAM ViT-B image encoder repurposed as a prompt-free detector
     "sam": {
-        "enabled": True,                       # ← True = include in this run
+        "enabled": False,                      # ← True = include in this run
         "config":  "configs/sam.yaml",          # ← change only if you moved the config file
         "weights": None,                        # ← pretrained init weights  (None = train from scratch)
         "resume":  None,                        # ← resume interrupted training (None = start fresh)
