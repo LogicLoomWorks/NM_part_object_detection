@@ -14,12 +14,11 @@ Notes:
 """
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig
 
 import timm
 
@@ -132,7 +131,7 @@ class TimmBackbone(nn.Module):
 # Builder
 # ---------------------------------------------------------------------------
 
-def build_backbone(cfg: DictConfig) -> TimmBackbone:
+def build_backbone(cfg: Any) -> TimmBackbone:
     """Construct a TimmBackbone from an OmegaConf config node.
 
     Accepts either the full model config (with a "backbone" sub-key) or the

@@ -25,12 +25,11 @@ Interface
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
 
 from models.DEIMv2.backbone    import TimmBackbone
 from models.DEIMv2.neck        import FPN
@@ -134,7 +133,7 @@ class DEIMv2Visual(nn.Module):
     }
     """
 
-    def __init__(self, cfg: DictConfig) -> None:
+    def __init__(self, cfg: Any) -> None:
         super().__init__()
         mc = cfg
         tc = mc.transformer
@@ -449,25 +448,25 @@ class DEIMv2Visual(nn.Module):
 
 # ── factory + checkpoint utils ────────────────────────────────────────────────
 
-def build_model(cfg: DictConfig) -> DEIMv2Visual:
+def build_model(cfg: Any) -> DEIMv2Visual:
     return DEIMv2Visual(cfg.model)
 
 
 def save_checkpoint(
     model: DEIMv2Visual,
     path: str,
-    cfg: DictConfig | None = None,
+    cfg: Any | None = None,
 ) -> None:
     """Save model weights and optionally the config."""
     payload = {"model_state_dict": model.state_dict()}
     if cfg is not None:
-        payload["cfg"] = OmegaConf.to_container(cfg, resolve=True)
+        payload["cfg"] = vars(cfg) if hasattr(cfg, "__dict__") else dict(cfg)
     torch.save(payload, path)
 
 
 def load_checkpoint(
     path: str,
-    cfg: DictConfig,
+    cfg: Any,
     device: Optional[str] = None,
 ) -> tuple[DEIMv2Visual, dict]:
     """Load a checkpoint.

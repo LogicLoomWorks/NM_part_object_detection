@@ -6,12 +6,11 @@ Components:
 """
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig
 
 
 class FPN(nn.Module):
@@ -79,7 +78,7 @@ class FPN(nn.Module):
         return outputs
 
 
-def build_neck(cfg: DictConfig, in_channels: List[int]) -> FPN:
+def build_neck(cfg: Any, in_channels: List[int]) -> FPN:
     """Construct an FPN neck from config.
 
     Args:
