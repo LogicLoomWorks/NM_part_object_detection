@@ -1,5 +1,5 @@
 """
-Hungarian matcher — pairs predicted boxes/logits with GT targets.
+Hungarian matcher for DEIMv2 — pairs predicted boxes/logits with GT targets.
 Self-contained: _generalised_iou is defined locally.
 """
 

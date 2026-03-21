@@ -1,346 +1,501 @@
 """
-models/groundingdino/model.py
+models/sam/model.py
 
-Fixes applied
-─────────────
-1. _build_masks_and_pos  – key_padding_mask was inverted.
-     OLD:  key_padding_mask = ~mask.flatten(1)   # flips valid→True (BAD)
-     NEW:  key_padding_mask =  mask.flatten(1)   # True = padded  (GOOD)
+SamDetector — SAM ViT-B used as a prompt-guided object detector.
 
-2. TransformerDecoder wiring – decoder must expose per-layer class/box heads
-   and return (intermediate_hs, aux_outputs) so the model can build
-   pred_logits + pred_boxes + aux_outputs correctly.
+Architecture overview
+─────────────────────
+1. Image encoder  : SAM ViT-B (loaded from segment_anything if available,
+                    otherwise falls back to timm vit_base_patch16_224).
+2. Prompt encoder : LearnedGridPrompts — a set of learnable 2-D point coords
+                    that produce ``num_queries`` sparse embeddings.
+3. Mask decoder   : Simplified cross-attention decoder (implemented inline).
+                    For each query, cross-attends to the image embeddings and
+                    produces an iou-token vector + a mask logit map.
+4. Class head     : ClassificationHead maps iou-token → class logits.
+5. Box extraction : Tight bounding boxes derived from predicted masks
+                    (cx/cy/w/h in [0, 1]).
 
-3. PositionEmbeddingSine.forward signature   forward(self, x, mask=None)
-   (was forward(self, x) – crashed when called with two args).
-
-4. build_model – was passing full cfg instead of cfg.model to GroundingDINOVisual.
-     OLD:  return GroundingDINOVisual(cfg)
-     NEW:  return GroundingDINOVisual(cfg.model)
+Output interface (identical to GroundingDINOVisual)
+────────────────────────────────────────────────────
+{
+  "pred_logits": (B, Q, num_classes),   # raw logits
+  "pred_boxes":  (B, Q, 4),             # cx/cy/w/h in [0, 1]
+  "aux_outputs": []                      # empty — SAM has no aux layers
+}
 """
 from __future__ import annotations
 
+import logging
+import os
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
-from models.groundingdino.backbone import TimmBackbone
-from models.groundingdino.neck     import FPN
-from models.groundingdino.transformer import TransformerEncoder, TransformerDecoder
+from models.sam.prompt_encoder import LearnedGridPrompts
+from models.sam.classification_head import ClassificationHead
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Positional encoding
-# ──────────────────────────────────────────────────────────────────────────────
-
-class PositionEmbeddingSine(nn.Module):
-    """Sine/cosine 2-D positional encoding (DETR-style)."""
-
-    def __init__(self, num_pos_feats: int = 128,
-                 temperature: int = 10_000, normalize: bool = True):
-        super().__init__()
-        self.num_pos_feats = num_pos_feats
-        self.temperature   = temperature
-        self.normalize     = normalize
-        self.scale         = 2 * 3.141592653589793
-
-    def forward(self, x: torch.Tensor,
-                mask: torch.Tensor | None = None) -> torch.Tensor:
-        B, C, H, W = x.shape
-        if mask is None:
-            mask = torch.zeros(B, H, W, dtype=torch.bool, device=x.device)
-        # mask: True = padded  →  not_mask: True = valid
-        not_mask = ~mask
-        y_embed = not_mask.cumsum(1, dtype=torch.float32)   # (B,H,W)
-        x_embed = not_mask.cumsum(2, dtype=torch.float32)   # (B,H,W)
-        if self.normalize:
-            eps = 1e-6
-            y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
-            x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
-
-        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32,
-                              device=x.device)
-        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
-
-        pos_x = x_embed[:, :, :, None] / dim_t   # (B,H,W,C/2)
-        pos_y = y_embed[:, :, :, None] / dim_t
-
-        pos_x = torch.stack([pos_x[:, :, :, 0::2].sin(),
-                              pos_x[:, :, :, 1::2].cos()], dim=4).flatten(3)
-        pos_y = torch.stack([pos_y[:, :, :, 0::2].sin(),
-                              pos_y[:, :, :, 1::2].cos()], dim=4).flatten(3)
-
-        pos = torch.cat([pos_y, pos_x], dim=3).permute(0, 3, 1, 2)  # (B,C,H,W)
-        return pos
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Detection head helpers
+# Utility: masks → bounding boxes
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _mlp(in_dim: int, hidden_dim: int, out_dim: int, num_layers: int) -> nn.Sequential:
-    layers: list[nn.Module] = []
-    for i in range(num_layers):
-        i_dim = in_dim if i == 0 else hidden_dim
-        o_dim = out_dim if i == num_layers - 1 else hidden_dim
-        layers.append(nn.Linear(i_dim, o_dim))
-        if i < num_layers - 1:
-            layers.append(nn.ReLU(inplace=True))
-    return nn.Sequential(*layers)
+def masks_to_boxes_normalized(
+    mask_logits: torch.Tensor,
+    img_h: int,
+    img_w: int,
+) -> torch.Tensor:
+    """Convert binary mask logits to normalised cx/cy/w/h bounding boxes.
 
+    Args:
+        mask_logits: ``(B, Q, H, W)`` — raw mask scores (threshold at 0.5
+                     after sigmoid).
+        img_h:       Image height used for normalisation.
+        img_w:       Image width used for normalisation.
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main model
-# ──────────────────────────────────────────────────────────────────────────────
-
-class GroundingDINOVisual(nn.Module):
+    Returns:
+        boxes: ``(B, Q, 4)`` in cx/cy/w/h format, values in [0, 1].
+               Queries whose mask is all-zero get box ``[0.5, 0.5, 0.0, 0.0]``.
     """
-    Pure-visual DETR-style detector (no text grounding).
+    B, Q, H, W = mask_logits.shape
+    device = mask_logits.device
 
-    Input
-    -----
-    images : (B, 3, H, W)
-    masks  : (B, H, W)   True = padded pixel, False = valid pixel
+    # Threshold
+    masks = (mask_logits.sigmoid() > 0.5).float()  # (B, Q, H, W)
 
-    Output
-    ------
-    {
-      'pred_logits': (B, Q, num_classes),
-      'pred_boxes' : (B, Q, 4),          # cx/cy/w/h in [0,1]
-      'aux_outputs': [ {'pred_logits':…, 'pred_boxes':…}, … ]
-    }
+    # Build pixel grids once
+    ys = torch.arange(H, device=device, dtype=torch.float32) / max(H - 1, 1)
+    xs = torch.arange(W, device=device, dtype=torch.float32) / max(W - 1, 1)
+
+    boxes = torch.zeros(B, Q, 4, device=device, dtype=torch.float32)
+    # Default for empty masks
+    boxes[..., 0] = 0.5
+    boxes[..., 1] = 0.5
+
+    for b in range(B):
+        for q in range(Q):
+            m = masks[b, q]                         # (H, W)
+            if m.sum() == 0:
+                continue
+
+            # Rows and columns that have any foreground pixel
+            row_mask = m.any(dim=1)                 # (H,)
+            col_mask = m.any(dim=0)                 # (W,)
+
+            y_min = ys[row_mask].min()
+            y_max = ys[row_mask].max()
+            x_min = xs[col_mask].min()
+            x_max = xs[col_mask].max()
+
+            cx = (x_min + x_max) / 2.0
+            cy = (y_min + y_max) / 2.0
+            w  = x_max - x_min
+            h  = y_max - y_min
+
+            boxes[b, q] = torch.stack([cx, cy, w, h])
+
+    return boxes.clamp(0.0, 1.0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Simplified inline mask decoder
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SimpleMaskDecoder(nn.Module):
+    """Lightweight cross-attention decoder that mimics SAM's mask decoder.
+
+    For each query (point embedding) the decoder cross-attends to flattened
+    image features and produces:
+    - An iou-token vector used for classification.
+    - A mask logit map (upsampled to the spatial size of the image embeddings).
+
+    Args:
+        embed_dim:      Feature dimension (256 for SAM ViT-B).
+        nhead:          Number of attention heads.
+        dim_feedforward: FFN width.
+        dropout:        Dropout probability.
     """
 
-    def __init__(self, cfg: DictConfig):
-        super().__init__()
-        mc   = cfg
-        tc   = mc.transformer
-        d    = tc.d_model                   # 256
-
-        # ── backbone ──────────────────────────────────────────────────────────
-        self.backbone = TimmBackbone(
-            name       = mc.backbone.name,
-            pretrained = mc.backbone.pretrained,
-            freeze_at  = mc.backbone.freeze_at,
-            out_indices= list(mc.backbone.out_indices),
-        )
-        bb_channels = self.backbone.out_channels   # e.g. [256, 512, 1024]
-
-        # ── neck ──────────────────────────────────────────────────────────────
-        self.neck = FPN(
-            in_channels  = bb_channels,
-            out_channels = mc.neck.out_channels,
-            num_levels   = mc.neck.num_levels,
-        )
-
-        # ── projection (Conv1×1 + GN) per FPN level ───────────────────────────
-        num_levels = mc.neck.num_levels
-        self.input_proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(mc.neck.out_channels, d, 1),
-                nn.GroupNorm(32, d),
-            )
-            for _ in range(num_levels)
-        ])
-
-        # ── positional encoding ───────────────────────────────────────────────
-        self.pos_embed = PositionEmbeddingSine(num_pos_feats=d // 2)
-
-        # ── transformer ───────────────────────────────────────────────────────
-        self.encoder = TransformerEncoder(
-            d_model         = d,
-            nhead           = tc.nhead,
-            num_layers      = tc.num_encoder_layers,
-            dim_feedforward = tc.dim_feedforward,
-            dropout         = tc.dropout,
-        )
-
-        self.decoder = TransformerDecoder(
-            d_model            = d,
-            nhead              = tc.nhead,
-            num_layers         = tc.num_decoder_layers,
-            dim_feedforward    = tc.dim_feedforward,
-            dropout            = tc.dropout,
-            return_intermediate= True,
-        )
-
-        # ── query embeddings ──────────────────────────────────────────────────
-        self.tgt_embed         = nn.Embedding(mc.num_queries, d)
-        self.query_embed       = nn.Embedding(mc.num_queries, d)
-        self.reference_points  = nn.Embedding(mc.num_queries, 4)
-        nn.init.uniform_(self.reference_points.weight, 0.05, 0.95)
-
-        # ── per-decoder-layer classification + box heads ──────────────────────
-        num_dec = tc.num_decoder_layers
-        self.class_heads = nn.ModuleList([
-            nn.Linear(d, mc.num_classes) for _ in range(num_dec)
-        ])
-        self.box_heads = nn.ModuleList([
-            _mlp(d, d, 4, num_layers=3) for _ in range(num_dec)
-        ])
-
-        self.num_queries  = mc.num_queries
-        self.num_classes  = mc.num_classes
-        self.aux_loss     = mc.aux_loss
-
-    # ── internal helpers ──────────────────────────────────────────────────────
-
-    def _build_masks_and_pos(
+    def __init__(
         self,
-        proj_feats: list[torch.Tensor],
-        src_mask:   torch.Tensor,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        masks_list, pos_list = [], []
-        for feat in proj_feats:
-            _, _, H, W = feat.shape
-            m = F.interpolate(
-                src_mask.unsqueeze(1).float(), size=(H, W), mode="nearest"
-            ).squeeze(1).bool()
-            masks_list.append(m)
-            pos_list.append(self.pos_embed(feat, m))
-        return masks_list, pos_list
+        embed_dim: int = 256,
+        nhead: int = 8,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
 
-    # ── forward ───────────────────────────────────────────────────────────────
+        # Cross-attention: queries attend to image features
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=nhead,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm1 = nn.LayerNorm(embed_dim)
+
+        # Self-attention among queries
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=nhead,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+        # FFN
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, dim_feedforward),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, embed_dim),
+            nn.Dropout(dropout),
+        )
+        self.norm3 = nn.LayerNorm(embed_dim)
+
+        # Project iou-token to a mask (applied on top of image features)
+        self.mask_proj = nn.Linear(embed_dim, embed_dim)
+
+    def forward(
+        self,
+        image_embeddings: torch.Tensor,
+        point_embeddings: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the decoder.
+
+        Args:
+            image_embeddings: ``(B, C, H, W)`` image feature map from the
+                              image encoder.
+            point_embeddings: ``(Q, 1, C)`` per-query sparse embeddings from
+                              LearnedGridPrompts.
+
+        Returns:
+            iou_tokens: ``(B, Q, C)`` — per-query summary vectors for
+                         classification.
+            mask_logits: ``(B, Q, H, W)`` — per-query mask predictions.
+        """
+        B, C, H, W = image_embeddings.shape
+        Q = point_embeddings.shape[0]
+
+        # Flatten image features: (B, H*W, C)
+        img_flat = image_embeddings.flatten(2).permute(0, 2, 1)  # (B, HW, C)
+
+        # Expand point embeddings for the batch: (B, Q, C)
+        # point_embeddings shape: (Q, 1, C) → squeeze middle dim → (Q, C)
+        q_emb = point_embeddings.squeeze(1)                       # (Q, C)
+        q_emb = q_emb.unsqueeze(0).expand(B, -1, -1)             # (B, Q, C)
+
+        # Self-attention among queries
+        q2, _ = self.self_attn(q_emb, q_emb, q_emb)
+        q_emb = self.norm2(q_emb + q2)
+
+        # Cross-attention: queries attend to image features
+        q3, _ = self.cross_attn(q_emb, img_flat, img_flat)
+        q_emb = self.norm1(q_emb + q3)
+
+        # FFN
+        q_emb = self.norm3(q_emb + self.ffn(q_emb))
+
+        # iou tokens are the final query vectors
+        iou_tokens = q_emb                                        # (B, Q, C)
+
+        # Mask prediction: dot product between projected queries and image feats
+        mask_keys = self.mask_proj(iou_tokens)                    # (B, Q, C)
+        # (B, Q, C) x (B, C, HW) → (B, Q, HW) → (B, Q, H, W)
+        mask_logits = torch.bmm(mask_keys, img_flat.permute(0, 2, 1))
+        mask_logits = mask_logits.view(B, Q, H, W)
+
+        return iou_tokens, mask_logits
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Timm fallback image encoder (used when segment_anything is not installed)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _TimmFallbackEncoder(nn.Module):
+    """Minimal ViT-Base wrapper (timm) that projects to 256-channel output.
+
+    This is used when the ``segment_anything`` package is unavailable.
+    SAM weights are NOT loaded; timm ImageNet pretrained weights are used.
+    """
+
+    def __init__(self, image_size: int = 1024, out_channels: int = 256) -> None:
+        super().__init__()
+        import timm  # lazy import — checked at construction, not at module load
+
+        self.image_size = image_size
+
+        # timm ViT-B/16 — use 224 input size in the model config but we resize
+        # the input before passing it so the actual spatial output doesn't depend
+        # on image_size.
+        self.backbone = timm.create_model(
+            "vit_base_patch16_224",
+            pretrained=True,
+            num_classes=0,           # remove classification head
+            global_pool="",          # keep all patch tokens
+        )
+        vit_dim = self.backbone.embed_dim   # 768 for ViT-B
+
+        # Project from ViT feature dim → SAM-compatible 256 channels
+        self.proj = nn.Sequential(
+            nn.Conv2d(vit_dim, out_channels, kernel_size=1),
+            nn.GroupNorm(32, out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=1),
+        )
+
+        # Patch size used by the backbone
+        self.patch_size = 16
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract image features.
+
+        Args:
+            x: ``(B, 3, H, W)`` — images, already resized to ``image_size``.
+
+        Returns:
+            ``(B, 256, H//patch, W//patch)`` feature map.
+        """
+        # Resize to the backbone's expected 224×224
+        x224 = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+
+        # Forward through timm ViT — returns (B, N+1, C) where N=patch tokens,
+        # +1 is the CLS token.  Drop CLS token.
+        tokens = self.backbone.forward_features(x224)    # (B, N+1, C)
+        # timm ViT returns CLS at position 0
+        patch_tokens = tokens[:, 1:, :]                  # (B, N, C)
+
+        side = int(patch_tokens.shape[1] ** 0.5)
+        B, N, C = patch_tokens.shape
+        feat = patch_tokens.permute(0, 2, 1).reshape(B, C, side, side)
+
+        # Project to out_channels (256)
+        feat = self.proj(feat)                           # (B, 256, side, side)
+
+        # Upsample back to H//16, W//16 of the original (SAM-style output)
+        target_h = x.shape[2] // self.patch_size
+        target_w = x.shape[3] // self.patch_size
+        if feat.shape[2] != target_h or feat.shape[3] != target_w:
+            feat = F.interpolate(feat, size=(target_h, target_w), mode="bilinear", align_corners=False)
+
+        return feat
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dummy prompt encoder shim (for fallback path without segment_anything)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _DummyPromptEncoder(nn.Module):
+    """Minimal prompt encoder shim used in the timm fallback path.
+
+    LearnedGridPrompts.forward() needs a ``prompt_encoder`` argument that at
+    minimum has no ``pe_layer`` attribute (so the fallback sinusoidal embedding
+    is used).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main detector
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SamDetector(nn.Module):
+    """SAM ViT-B repurposed as a prompt-free object detector.
+
+    The model accepts batched images and returns detection outputs that match
+    the interface produced by GroundingDINOVisual:
+
+    .. code-block:: python
+
+        {
+            "pred_logits": Tensor(B, Q, num_classes),   # raw logits
+            "pred_boxes":  Tensor(B, Q, 4),             # cx/cy/w/h in [0,1]
+            "aux_outputs": []
+        }
+
+    Args:
+        cfg: OmegaConf DictConfig node (the ``model`` sub-tree from
+             ``configs/sam.yaml``).
+    """
+
+    def __init__(self, cfg: DictConfig) -> None:
+        super().__init__()
+
+        self.num_queries  = int(cfg.num_queries)
+        self.num_classes  = int(cfg.num_classes)
+        self.embed_dim    = int(cfg.embed_dim)
+        self.image_size   = int(cfg.image_size)
+        self.freeze_image_encoder = bool(cfg.freeze_image_encoder)
+        self._using_sam   = False          # set to True if segment_anything loads OK
+
+        weights_path: str = str(cfg.weights_path)
+
+        # ── 1. Image encoder ─────────────────────────────────────────────────
+        self.image_encoder, self._prompt_encoder_for_embed = (
+            self._build_image_encoder(weights_path)
+        )
+
+        if self.freeze_image_encoder:
+            for p in self.image_encoder.parameters():
+                p.requires_grad_(False)
+
+        # ── 2. Learned prompt grid ────────────────────────────────────────────
+        self.learned_prompts = LearnedGridPrompts(
+            num_queries=self.num_queries,
+            embed_dim=self.embed_dim,
+        )
+
+        # ── 3. Inline mask decoder ────────────────────────────────────────────
+        tc = cfg.transformer
+        self.mask_decoder = SimpleMaskDecoder(
+            embed_dim=self.embed_dim,
+            nhead=int(tc.nhead),
+            dim_feedforward=int(tc.dim_feedforward),
+            dropout=float(tc.dropout),
+        )
+
+        # ── 4. Classification head ────────────────────────────────────────────
+        self.class_head = ClassificationHead(
+            embed_dim=self.embed_dim,
+            num_classes=self.num_classes,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Construction helpers                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _build_image_encoder(
+        self, weights_path: str
+    ) -> tuple[nn.Module, nn.Module]:
+        """Try to load the SAM ViT-B image encoder.
+
+        Precedence:
+        1. ``segment_anything`` package + weights file  → full SAM encoder.
+        2. ``segment_anything`` not installed           → timm fallback (warns).
+
+        Returns:
+            (image_encoder, prompt_encoder_or_shim)
+        """
+        # Check weights file first — raise early before touching segment_anything.
+        if not os.path.isfile(weights_path):
+            raise FileNotFoundError(
+                f"SAM weights not found at {weights_path}. "
+                "Download sam_vit_b_01ec64.pth from the SAM repo and place it "
+                "at models/pretrained/sam_vit_b.pth"
+            )
+
+        try:
+            from segment_anything import sam_model_registry  # lazy import
+
+            sam = sam_model_registry["vit_b"](checkpoint=weights_path)
+            self._using_sam = True
+            logger.info("SamDetector: loaded SAM ViT-B from %s", weights_path)
+            return sam.image_encoder, sam.prompt_encoder
+
+        except ImportError:
+            logger.warning(
+                "SamDetector: 'segment_anything' package not found. "
+                "Falling back to timm ViT-B (SAM weights NOT loaded). "
+                "Install segment_anything for full SAM support."
+            )
+            encoder = _TimmFallbackEncoder(
+                image_size=self.image_size,
+                out_channels=self.embed_dim,
+            )
+            return encoder, _DummyPromptEncoder()
+
+    # ------------------------------------------------------------------ #
+    # Forward                                                              #
+    # ------------------------------------------------------------------ #
 
     def forward(
         self,
         images: torch.Tensor,
-        masks:  torch.Tensor | None = None,
+        masks: Optional[torch.Tensor] = None,  # noqa: ARG002 — ignored, kept for interface compat
     ) -> dict[str, torch.Tensor]:
+        """Run SAM-based detection.
 
+        Args:
+            images: ``(B, 3, H, W)`` — input images.  Resized to
+                    ``self.image_size`` internally.
+            masks:  Ignored.  SAM handles padding internally.  Kept for
+                    interface compatibility with GroundingDINOVisual.
+
+        Returns:
+            A dict with keys ``pred_logits``, ``pred_boxes``, ``aux_outputs``.
+        """
         B = images.shape[0]
 
-        # Default to all-valid mask if none provided
-        if masks is None:
-            masks = torch.zeros(
-                B, images.shape[2], images.shape[3],
-                dtype=torch.bool, device=images.device,
+        # ── Resize to SAM's native resolution ────────────────────────────────
+        if images.shape[2] != self.image_size or images.shape[3] != self.image_size:
+            images_resized = F.interpolate(
+                images,
+                size=(self.image_size, self.image_size),
+                mode="bilinear",
+                align_corners=False,
             )
+        else:
+            images_resized = images
 
-        # 1. Backbone → FPN → projection
-        bb_feats   = self.backbone(images)
-        neck_feats = self.neck(bb_feats)
-        proj_feats = [proj(f) for proj, f in zip(self.input_proj, neck_feats)]
+        # ── 1. Image encoder ─────────────────────────────────────────────────
+        if self.freeze_image_encoder:
+            with torch.no_grad():
+                image_embeddings = self.image_encoder(images_resized)
+        else:
+            image_embeddings = self.image_encoder(images_resized)
 
-        # 2. Masks + positional encodings at each level
-        masks_list, pos_list = self._build_masks_and_pos(proj_feats, masks)
+        # Ensure (B, C, H, W) — SAM's image encoder already outputs this shape;
+        # the timm fallback also produces this.
+        if image_embeddings.dim() == 3:
+            # Some ViT variants return (B, N, C) — reshape to 2D spatial.
+            BN, N, C = image_embeddings.shape
+            side = int(N ** 0.5)
+            image_embeddings = image_embeddings.permute(0, 2, 1).reshape(BN, C, side, side)
 
-        # 3. Flatten + concatenate all levels → (B, N, C)
-        src = torch.cat(
-            [f.flatten(2).permute(0, 2, 1) for f in proj_feats], dim=1
-        )
-        pos_enc = torch.cat(
-            [p.flatten(2).permute(0, 2, 1) for p in pos_list], dim=1
-        )
-        key_padding_mask = torch.cat(
-            [m.flatten(1) for m in masks_list], dim=1
-        )  # (B, N)  True = padded
+        _, C, H_feat, W_feat = image_embeddings.shape
 
-        # 4. Encoder  (S, B, C)
-        memory = self.encoder(
-            src.transpose(0, 1),
-            key_padding_mask = key_padding_mask,
-            pos              = pos_enc.transpose(0, 1),
-        )  # (N, B, C)
+        # ── 2. Learned prompts ────────────────────────────────────────────────
+        # sparse_embeddings: (Q, 1, embed_dim)
+        sparse_embeddings = self.learned_prompts(self._prompt_encoder_for_embed)
 
-        # 5. Query initialisation
-        tgt       = self.tgt_embed.weight.unsqueeze(1).expand(-1, B, -1)
-        query_pos = self.query_embed.weight.unsqueeze(1).expand(-1, B, -1)
-        ref_pts   = (
-            self.reference_points.weight
-            .sigmoid()
-            .clamp(1e-4, 1 - 1e-4)
-            .unsqueeze(1).expand(-1, B, -1)
-        )
+        # ── 3. Mask decoder ───────────────────────────────────────────────────
+        # iou_tokens:  (B, Q, embed_dim)
+        # mask_logits: (B, Q, H_feat, W_feat)
+        iou_tokens, mask_logits = self.mask_decoder(image_embeddings, sparse_embeddings)
 
-        # 6. Decoder → (num_layers, Q, B, C)
-        hs = self.decoder(
-            tgt                      = tgt,
-            memory                   = memory,
-            memory_key_padding_mask  = key_padding_mask,
-            pos                      = pos_enc.transpose(0, 1),
-            query_pos                = query_pos,
-        )
+        # ── 4. Classification logits ──────────────────────────────────────────
+        pred_logits = self.class_head(iou_tokens)           # (B, Q, num_classes)
 
-        # 7. Per-layer heads
-        ref_pts_bq = ref_pts.permute(1, 0, 2)
-        ref_logit  = torch.log(ref_pts_bq / (1.0 - ref_pts_bq))
+        # ── 5. Bounding boxes from masks ──────────────────────────────────────
+        pred_boxes = masks_to_boxes_normalized(
+            mask_logits, img_h=H_feat, img_w=W_feat
+        )                                                   # (B, Q, 4)
 
-        outputs_classes, outputs_coords = [], []
-        for lvl in range(hs.shape[0]):
-            out    = hs[lvl].permute(1, 0, 2)
-            logits = self.class_heads[lvl](out)
-            delta  = self.box_heads[lvl](out)
-            coords = (ref_logit + delta).sigmoid().clamp(0.0, 1.0)
-            outputs_classes.append(logits)
-            outputs_coords.append(coords)
-
-        out_dict: dict = {
-            "pred_logits": outputs_classes[-1],
-            "pred_boxes" : outputs_coords[-1],
+        return {
+            "pred_logits": pred_logits,
+            "pred_boxes":  pred_boxes,
+            "aux_outputs": [],
         }
-        if self.aux_loss:
-            out_dict["aux_outputs"] = [
-                {"pred_logits": lc, "pred_boxes": bc}
-                for lc, bc in zip(outputs_classes[:-1], outputs_coords[:-1])
-            ]
-        return out_dict
 
 
-# ── convenience alias ─────────────────────────────────────────────────────────
-GroundingDINO = GroundingDINOVisual
+# ──────────────────────────────────────────────────────────────────────────────
+# Factory
+# ──────────────────────────────────────────────────────────────────────────────
 
+def build_model(cfg: DictConfig) -> SamDetector:
+    """Construct a SamDetector from the top-level OmegaConf config.
 
-# ── factory + checkpoint utils ───────────────────────────────────────────────
-
-def build_model(cfg: DictConfig) -> GroundingDINOVisual:
-    # FIX #4: pass cfg.model, not the full cfg
-    return GroundingDINOVisual(cfg.model)
-
-
-def save_checkpoint(
-    model: GroundingDINOVisual,
-    path: str,
-    cfg: DictConfig | None = None,
-) -> None:
-    """Save model weights and optionally the config."""
-    payload = {"model_state_dict": model.state_dict()}
-    if cfg is not None:
-        payload["cfg"] = OmegaConf.to_container(cfg, resolve=True)
-    torch.save(payload, path)
-
-
-def load_checkpoint(
-    path: str,
-    cfg: DictConfig,
-    device: Optional[str] = None,
-) -> tuple[GroundingDINOVisual, dict]:
-    """Load a checkpoint saved by save_checkpoint or Lightning's ModelCheckpoint.
+    Args:
+        cfg: The full config (``cfg.model`` is the relevant sub-tree).
 
     Returns:
-        model   — GroundingDINOVisual instance with weights loaded, in eval mode
-        payload — the raw checkpoint dict
+        An initialised SamDetector instance.
     """
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    payload = torch.load(path, map_location=device)
-
-    model = build_model(cfg)
-
-    # Support both raw state dicts and Lightning checkpoints
-    if "state_dict" in payload:
-        # Lightning saves weights with 'model.' prefix from DetectionLightningModule
-        state = {
-            k.removeprefix("model."): v
-            for k, v in payload["state_dict"].items()
-        }
-    elif "model_state_dict" in payload:
-        state = payload["model_state_dict"]
-    else:
-        state = payload
-
-    model.load_state_dict(state)
-    model.to(device).eval()
-    return model, payload
+    return SamDetector(cfg.model)

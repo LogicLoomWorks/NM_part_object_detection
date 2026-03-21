@@ -1,23 +1,29 @@
 model:
-  name: groundingdino
+  name: sam
+  sam_variant: vit_b
+  weights_path: models/pretrained/sam_vit_b.pth
+  freeze_image_encoder: true
+  num_queries: 300
+  num_classes: 356
+  aux_loss: false
+  embed_dim: 256          # SAM ViT-B output channels
+  image_size: 1024        # SAM's native resolution
+  # backbone/neck/transformer sections kept for config compat but not used by SAM
   backbone:
-    name: resnet50
+    name: sam_vit_b
     pretrained: true
-    freeze_at: 1
-    out_indices: [2, 3, 4]  # stages 2-4 (strides 8/16/32) → 3 feature maps feeding the FPN
+    freeze_at: -1
+    out_indices: [0]
   neck:
     out_channels: 256
-    num_levels: 4            # 3 from backbone + 1 extra stride-2 level
+    num_levels: 1
   transformer:
     d_model: 256
     nhead: 8
-    num_encoder_layers: 6
-    num_decoder_layers: 6
+    num_encoder_layers: 0
+    num_decoder_layers: 1
     dim_feedforward: 2048
     dropout: 0.1
-  num_classes: 356
-  num_queries: 300
-  aux_loss: true
 
 data:
   ann_file: data/raw/coco_dataset/train/annotations.json
@@ -46,7 +52,7 @@ training:
     loss_ce: 2.0
     loss_bbox: 5.0
     loss_giou: 2.0
-  checkpoint_dir: models/checkpoints/groundingdino
+  checkpoint_dir: models/checkpoints/sam
   log_every_n_steps: 10
 
 inference:

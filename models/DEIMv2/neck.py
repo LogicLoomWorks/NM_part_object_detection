@@ -1,4 +1,4 @@
-"""Feature Pyramid Network neck for multi-scale object detection.
+"""Feature Pyramid Network neck for DEIMv2 multi-scale object detection.
 
 Components:
   - FPN: lateral connections + top-down pathway + extra stride-2 levels

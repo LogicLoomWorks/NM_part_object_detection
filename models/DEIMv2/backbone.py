@@ -1,4 +1,4 @@
-"""CNN backbone for GroundingDINO-style object detection.
+"""CNN backbone for DEIMv2 object detection.
 
 Components:
   - TimmBackbone: wraps a timm model and extracts multi-scale feature maps
@@ -14,7 +14,7 @@ Notes:
 """
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torch.nn as nn
