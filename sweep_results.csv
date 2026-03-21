@@ -1,0 +1,3 @@
+run_index,model,aug_preset,backbone,neck,experiment_tag,final_val_metric,epochs_completed
+0,groundingdino,none,0,0,sweep__groundingdino__aug_none__backbone=0__neck=0,2845.42822265625,1
+1,groundingdino,none,0,1,sweep__groundingdino__aug_none__backbone=0__neck=1,2814.896240234375,1

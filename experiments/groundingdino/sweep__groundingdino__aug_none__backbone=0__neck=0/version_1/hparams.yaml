@@ -1,0 +1,58 @@
+model:
+  name: groundingdino
+  backbone:
+    name: resnet50
+    pretrained: true
+    freeze_at: 1
+    out_indices:
+    - 2
+    - 3
+    - 4
+  neck:
+    out_channels: 256
+    num_levels: 4
+  transformer:
+    d_model: 256
+    nhead: 8
+    num_encoder_layers: 6
+    num_decoder_layers: 6
+    dim_feedforward: 2048
+    dropout: 0.1
+  num_classes: 356
+  num_queries: 300
+  aux_loss: true
+data:
+  ann_file: data/raw/coco_dataset/train/annotations.json
+  img_dir: data/raw/coco_dataset/train/images
+  max_size: 480
+  num_workers: 4
+  batch_size: 2
+  val_split: 0.2
+  seed: 42
+training:
+  max_epochs: 1
+  base_lr: 0.0001
+  backbone_lr: 1.0e-05
+  weight_decay: 0.0001
+  grad_clip: 0.1
+  lr_milestones:
+  - 40
+  lr_gamma: 0.1
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  matcher:
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+  loss_weights:
+    loss_ce: 2.0
+    loss_bbox: 5.0
+    loss_giou: 2.0
+  checkpoint_dir: models/checkpoints/groundingdino/sweep__groundingdino__aug_none__backbone=0__neck=0
+  log_every_n_steps: 10
+  log_dir: experiments/groundingdino/sweep__groundingdino__aug_none__backbone=0__neck=0
+inference:
+  threshold: 0.3
+  nms_threshold: 0.5
+  top_k: 300
+  device: cuda
