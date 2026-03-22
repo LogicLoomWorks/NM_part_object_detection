@@ -1,0 +1,1 @@
+The code for my last submission under the norvegian championship can be found in "/priv_proj/jupyter_directory_Code_for_last_submission". Other code was earlier work donne under the event"
