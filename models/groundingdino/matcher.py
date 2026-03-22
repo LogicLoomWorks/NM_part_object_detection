@@ -8,6 +8,12 @@ import torch.nn as nn
 from scipy.optimize import linear_sum_assignment
 
 
+def box_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    """Convert boxes from (cx, cy, w, h) to (x1, y1, x2, y2) format."""
+    cx, cy, w, h = boxes.unbind(-1)
+    return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
+
+
 def _generalised_iou(boxes1: torch.Tensor,
                      boxes2: torch.Tensor) -> torch.Tensor:
     """GIoU between two sets of boxes in normalised cx/cy/w/h format."""

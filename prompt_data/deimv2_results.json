@@ -1,0 +1,16 @@
+{
+  "detection_mAP50": 0.0,
+  "detection_mAP50_95": 0.0,
+  "classification_accuracy": 0.008443908323281062,
+  "combined_score": 0.0025331724969843185,
+  "precision": 0.0,
+  "recall": 0.0,
+  "loss_final": 22.36705780029297,
+  "training_time_minutes": 24.2,
+  "checkpoint_path": "C:\\Users\\Sindr\\codes\\NM_part_object_detection\\models\\checkpoints\\deimv2\\exp_DEIMv2_1.0\\best.ckpt",
+  "experiment_tag": "exp_DEIMv2_1.0",
+  "epochs": 20,
+  "config": "configs/deimv2.yaml",
+  "eval_threshold_used": 0.05,
+  "note": "Threshold lowered to 0.05 (from 0.30) because DETR-style models need ~300+ epochs to reach high-confidence predictions; max prob after 20 epochs was ~0.10."
+}

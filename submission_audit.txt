@@ -1,0 +1,213 @@
+
+
+====================================================================
+SUBMISSION AUDIT REPORT — NorgesGruppen Object Detection
+Generated: 2026-03-21
+====================================================================
+
+────────────────────────────────────────────────────────────────────
+SECTION 1 — run.py STATUS
+────────────────────────────────────────────────────────────────────
+
+STATUS: OK — run.py already exists at project root and is the correct
+inference entry point. It accepts --input and --output arguments and
+runs the full DEIMv2 + SigLIP pipeline offline. It is NOT a training
+script. No changes needed for the interface itself.
+
+  Usage: python run.py --input /data/images --output /output/predictions.json
+
+
+────────────────────────────────────────────────────────────────────
+SECTION 2 — WEIGHT FILES (project root, excluding .venv / ZZZ_submission)
+────────────────────────────────────────────────────────────────────
+
+Files that would be included in the submission zip:
+
+  FILE                                     SIZE (MB)   ROLE
+  ─────────────────────────────────────────────────────────────────
+  checkpoints/deimv2_best.pt               451.8 MB    DEIMv2 detector weights
+  siglip_weights/vision_model.safetensors  354.4 MB    SigLIP vision encoder
+  gallery/gallery_embeddings.npy             1.01 MB   Product gallery vectors
+  gallery/gallery_category_ids.npy           0.001 MB  Gallery category IDs
+  ─────────────────────────────────────────────────────────────────
+  TOTAL                                    807.2 MB
+  LIMIT                                    420 MB
+
+Other .pt files at project root (NOT for submission):
+  yolov8n.pt           6.3 MB    (pre-trained base, not used in inference)
+  yolov8x.pt         131.0 MB    (pre-trained base, not used in inference)
+  rtdetr-l.pt         64.0 MB    (pre-trained base, not used in inference)
+  rtdetr-x.pt        130.0 MB    (pre-trained base, not used in inference)
+
+No .onnx files found in project (only in .venv test fixtures — ignored).
+
+
+────────────────────────────────────────────────────────────────────
+SECTION 3 — BLOCKED IMPORTS / CALLS IN SUBMISSION FILES
+────────────────────────────────────────────────────────────────────
+
+Checked files: run.py + the 7 DEIMv2 helper files in models/DEIMv2/
+
+BLOCKED IMPORTS FOUND IN SUBMISSION-RELEVANT FILES:
+  None. run.py and models/DEIMv2/*.py do not import any of:
+  os, sys, subprocess, socket, ctypes, builtins, importlib,
+  pickle, marshal, shelve, shutil, yaml, requests, urllib,
+  http.client, multiprocessing, threading, signal, gc, code,
+  codeop, pty
+
+BLOCKED CALLS FOUND IN SUBMISSION-RELEVANT FILES:
+  No use of eval(), exec(), compile(), __import__(), or dangerous getattr().
+  (model.eval() and getattr() in trainer.py are benign — trainer.py is
+  a training script not included in the submission zip.)
+
+NON-SUBMISSION FILES WITH BLOCKED IMPORTS (for reference only):
+  build_submission.py    — import shutil       (not in zip)
+  eval_deimv2.py         — import sys          (not in zip)
+  eval_groundingdino.py  — import sys          (not in zip)
+  models/SAM/model.py    — import os           (not in zip)
+  train_deimv2.py        — import sys          (not in zip)
+
+
+────────────────────────────────────────────────────────────────────
+SECTION 4 — PYTHON FILE COUNT FOR SUBMISSION
+────────────────────────────────────────────────────────────────────
+
+Based on the ZZZ_submission structure and run.py imports, the minimum
+required Python files for the submission are:
+
+  #   FILE                          NEEDED BY
+  ─────────────────────────────────────────────────────────────────
+  1   run.py                        entry point (required)
+  2   models/__init__.py            package init
+  3   models/DEIMv2/__init__.py     package init
+  4   models/DEIMv2/backbone.py     imported by model.py
+  5   models/DEIMv2/cdn.py          imported by model.py
+  6   models/DEIMv2/model.py        imported by run.py
+  7   models/DEIMv2/neck.py         imported by model.py
+  8   models/DEIMv2/transformer.py  imported by model.py
+  ─────────────────────────────────────────────────────────────────
+  TOTAL: 8 Python files
+  LIMIT: 10 Python files
+  STATUS: OK (under limit)
+
+Total project .py files (including training, eval, unused models): 51
+(Only the 8 above belong in the submission zip.)
+
+
+────────────────────────────────────────────────────────────────────
+SECTION 5 — ALL BLOCKERS (prioritised)
+────────────────────────────────────────────────────────────────────
+
+BLOCKER #1 [CRITICAL] — deimv2_best.pt ALONE EXCEEDS TOTAL WEIGHT LIMIT
+  checkpoints/deimv2_best.pt is 451.8 MB (473,710,648 bytes).
+  The total weight size limit is 420 MB.
+  This single file already exceeds the limit by ~32 MB.
+  FIX: Quantize the checkpoint to FP16 (should be ~226 MB).
+       torch.save({k: v.half() for k, v in sd.items()}, "deimv2_best_fp16.pt")
+
+BLOCKER #2 [CRITICAL] — TOTAL WEIGHT SIZE EXCEEDS LIMIT
+  Combined weight files: deimv2_best.pt (451.8 MB)
+                       + vision_model.safetensors (354.4 MB)
+                       + gallery .npy files (1.0 MB)
+                       = ~807.2 MB vs 420 MB limit.
+  FIX: Both deimv2_best.pt and vision_model.safetensors must be quantized
+       to FP16. Estimated savings:
+         deimv2_best.pt       FP32 → FP16: ~226 MB
+         vision_model.safetensors  FP32 → FP16: ~177 MB
+         Total after FP16: ~403 MB + 1 MB gallery = ~404 MB (within limit).
+
+BLOCKER #3 [CRITICAL] — TOO MANY WEIGHT FILES (4 vs max 3)
+  The submission requires 4 weight files:
+    1. checkpoints/deimv2_best.pt        (.pt)
+    2. siglip_weights/vision_model.safetensors  (.safetensors)
+    3. gallery/gallery_embeddings.npy    (.npy)
+    4. gallery/gallery_category_ids.npy  (.npy)
+  Max allowed weight files: 3.
+  FIX: Merge gallery_embeddings.npy and gallery_category_ids.npy into a
+       single .npy file using np.savez() → save as gallery.npz (allowed as
+       .npy?). Alternatively, save both arrays into a single .npy file as
+       a structured array or pack into gallery_combined.npy. Then update
+       load_gallery() in run.py to load from one file.
+       NOTE: .npz is NOT in the allowed extensions list — use a single
+       .npy with a structured array or embed category IDs into the
+       embeddings file as an extra row/column.
+
+BLOCKER #4 [CRITICAL] — omegaconf NOT INSTALLED IN SANDBOX
+  models/DEIMv2/backbone.py, model.py, and neck.py all import:
+    from omegaconf import DictConfig         (backbone.py, neck.py)
+    from omegaconf import DictConfig, OmegaConf  (model.py)
+  'omegaconf' is NOT listed among sandbox pre-installed packages.
+  These imports will cause ImportError at inference time.
+  FIX: Replace DictConfig type hints with SimpleNamespace or plain dict.
+       Remove the OmegaConf.to_container() call in build_model()
+       (line ~464 of model.py) and use the config object directly.
+       run.py already builds the config as a SimpleNamespace (_ns()),
+       so the fix is to make the model files duck-type instead of
+       requiring omegaconf objects.
+
+BLOCKER #5 [WARNING] — NESTED ZIP STRUCTURE IN ZZZ_submission/
+  ZZZ_submission/ contains a nested ZZZ_submission/ZZZ_submission/
+  subfolder with a duplicate copy of all files. If the current
+  ZZZ_submission.zip was created from the outer ZZZ_submission/ folder,
+  run.py will NOT be at the zip root — it will be at ZZZ_submission/run.py.
+  The docs state: "run.py must be at the root of the zip — not inside a
+  subfolder. This is the most common submission error."
+  FIX: Zip only the contents of ZZZ_submission/ (not the folder itself).
+       See build_submission.py which likely handles this.
+
+BLOCKER #6 [WARNING] — torch.load(..., weights_only=False) IN run.py
+  run.py line 104: torch.load(str(CKPT_PATH), map_location=device, weights_only=False)
+  This loads a pickle-based checkpoint. While torch is an allowed import,
+  weights_only=False enables arbitrary code execution via pickle — the
+  sandbox security scanner may flag this. The deimv2_best.pt checkpoint
+  is a full dict (not a torch.save(model) save), so it should survive
+  weights_only=True if it contains only tensors and plain Python types.
+  FIX: Try weights_only=True first. If that fails, the checkpoint must be
+       re-saved as a pure state-dict with only tensor values.
+
+
+────────────────────────────────────────────────────────────────────
+SECTION 6 — SUBMISSION FILES CHECKLIST
+────────────────────────────────────────────────────────────────────
+
+Files that MUST be in the zip (8 .py + 4 weight files):
+
+  run.py                                   [.py — required]
+  models/__init__.py                       [.py]
+  models/DEIMv2/__init__.py                [.py]
+  models/DEIMv2/backbone.py                [.py — NEEDS omegaconf fix]
+  models/DEIMv2/cdn.py                     [.py]
+  models/DEIMv2/model.py                   [.py — NEEDS omegaconf fix]
+  models/DEIMv2/neck.py                    [.py — NEEDS omegaconf fix]
+  models/DEIMv2/transformer.py             [.py]
+  checkpoints/deimv2_best.pt              [.pt — NEEDS FP16 quantization]
+  siglip_weights/vision_model.safetensors [.safetensors — NEEDS FP16 quantization]
+  gallery/gallery_embeddings.npy          [.npy — MUST be merged with category_ids]
+  gallery/gallery_category_ids.npy        [.npy — MUST be merged into one file]
+
+
+────────────────────────────────────────────────────────────────────
+SECTION 7 — SUMMARY TABLE
+────────────────────────────────────────────────────────────────────
+
+  CHECK                          STATUS    DETAIL
+  ──────────────────────────────────────────────────────────────────────
+  run.py exists at root          PASS      Already correct inference entry point
+  run.py accepts --input/--output PASS     Args defined at lines 546-550
+  Max Python files (≤10)         PASS      8 required files
+  Max weight files (≤3)          FAIL  ←  4 files needed (need to merge gallery)
+  deimv2_best.pt size (≤420 MB)  FAIL  ←  451.8 MB (must quantize to FP16)
+  Total weight size (≤420 MB)    FAIL  ←  807.2 MB total (must quantize both)
+  Total zip size (≤420 MB)       FAIL  ←  ~807 MB (same as above)
+  Blocked imports in submission  PASS      None of the 18 blocked modules used
+  Blocked function calls         PASS      No eval/exec/compile/__import__
+  omegaconf available in sandbox FAIL  ←  Not pre-installed; 3 model files use it
+  Zip root structure             WARN  ←  Nested folder detected in ZZZ_submission/
+  weights_only=False             WARN  ←  May be flagged; try weights_only=True
+
+  TOTAL CRITICAL BLOCKERS: 4
+  TOTAL WARNINGS: 2
+
+====================================================================
+END OF AUDIT
+====================================================================
